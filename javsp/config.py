@@ -1,3 +1,5 @@
+import shutil
+import sys
 from argparse import ArgumentParser, RawTextHelpFormatter
 from enum import Enum
 from typing import Dict, List, Literal, TypeAlias, Union
@@ -215,13 +217,30 @@ class Other(BaseConfig):
     check_update: bool
     auto_update: bool
 
+def get_macos_user_config():
+    """macOS 打包为 .app 后，配置应写到用户目录而不是包内 Resources"""
+    config_dir = Path.home() / 'Library' / 'Application Support' / 'JavSP'
+    user_cfg = config_dir / 'config.yml'
+    if not user_cfg.exists():
+        try:
+            config_dir.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(resource_path('config.yml'), user_cfg)
+        except OSError:
+            # 用户目录不可写时退回使用 .app 内自带的只读默认配置
+            return resource_path('config.yml')
+    return str(user_cfg)
+
+
 def get_config_source():
     parser = ArgumentParser(prog='JavSP', description='汇总多站点数据的AV元数据刮削器', formatter_class=RawTextHelpFormatter)
     parser.add_argument('-c', '--config', help='使用指定的配置文件')
     args, _ = parser.parse_known_args()
     sources = []
     if args.config is None:
-        args.config = resource_path('config.yml')
+        if sys.platform == 'darwin' and getattr(sys, 'frozen', False):
+            args.config = get_macos_user_config()
+        else:
+            args.config = resource_path('config.yml')
     sources.append(FileSource(file=args.config))
     sources.append(EnvSource(prefix='JAVSP_', allow_all=True))
     sources.append(CLArgSource(prefix='o'))

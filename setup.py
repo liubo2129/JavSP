@@ -1,4 +1,5 @@
 import os
+import sys
 from typing import List, Tuple
 from cx_Freeze import setup, Executable
 
@@ -32,16 +33,31 @@ build_exe = {
     'packages': packages,
 }
 
+if sys.platform == 'win32':
+    icon = './image/JavSP.ico'
+elif sys.platform == 'darwin':
+    icon = './image/JavSP.icns'
+else:
+    icon = None
+
 javsp = Executable(
     './javsp/__main__.py', 
     target_name='JavSP', 
     base=base,
-    icon='./image/JavSP.ico',
+    icon=icon,
 )
+
+options = {'build_exe': build_exe}
+if sys.platform == 'darwin':
+    # macOS 使用 bdist_mac 生成 JavSP.app；应用图标由 iconfile 指定
+    options['bdist_mac'] = {
+        'iconfile': './image/JavSP.icns',
+        'bundle_name': 'JavSP',
+    }
 
 setup(
     name='JavSP',
-    options = {'build_exe': build_exe}, 
+    options=options,
     executables=[javsp]
 )
 

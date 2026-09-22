@@ -52,9 +52,19 @@ jobs:
           poetry install
 
       - name: Build with Cx_Freeze
-        run: poetry run python setup.py build_exe -b dist
+        run: |
+          if [[ "$RUNNER_OS" == "macOS" ]]; then
+            poetry run python setup.py bdist_mac
+            mkdir -p dist/JavSP
+            cp -R build/JavSP.app dist/JavSP/
+            cp JavSP.command dist/JavSP/
+            chmod 755 dist/JavSP/JavSP.command
+            ditto -c -k --sequesterRsrc --keepParent dist/JavSP dist/JavSP-macos.zip
+          else
+            poetry run python setup.py build_exe -b dist
+          fi
 
-      - name: Set VERSION variable for windows
+      - name: Set VERSION variable
         shell: bash
         run: |
           echo "VERSION=`poetry run python tools/version.py`" >> $GITHUB_ENV

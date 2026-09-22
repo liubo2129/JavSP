@@ -21,7 +21,8 @@ from javsp.web.exceptions import *
 __all__ = ['Request', 'get_html', 'post_html', 'request_get', 'resp2html', 'is_connectable', 'download', 'get_resp_text', 'read_proxy']
 
 
-headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36'}
+_UA_PLATFORM = 'Macintosh; Intel Mac OS X 10_15_7' if sys.platform == 'darwin' else 'Windows NT 10.0; Win64; x64'
+headers = {'User-Agent': f'Mozilla/5.0 ({_UA_PLATFORM}) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36'}
 
 logger = logging.getLogger(__name__)
 # 删除js脚本相关的tag，避免网页检测到没有js运行环境时强行跳转，影响调试
@@ -257,11 +258,17 @@ def download(url, output_path, desc=None):
 def open_in_chrome(url, new=0, autoraise=True):
     """使用指定的Chrome Profile打开url，便于调试"""
     import subprocess
-    chrome = R'C:\Program Files\Google\Chrome\Application\chrome.exe'
-    subprocess.run(f'"{chrome}" --profile-directory="Profile 2" {url}', shell=True)
+    if sys.platform == 'darwin':
+        chrome = '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'
+    elif sys.platform == 'win32':
+        chrome = R'C:\Program Files\Google\Chrome\Application\chrome.exe'
+    else:
+        chrome = 'google-chrome'
+    subprocess.run([chrome, '--profile-directory=Profile 2', url], check=False)
 
-import webbrowser
-webbrowser.open = open_in_chrome
+if hasattr(sys, 'javsp_debug_mode'):
+    import webbrowser
+    webbrowser.open = open_in_chrome
 
 
 if __name__ == "__main__":

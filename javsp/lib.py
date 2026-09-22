@@ -16,12 +16,24 @@ def re_escape(s: str) -> str:
 
 
 def resource_path(path: str) -> str:
-    """获取一个随代码打包的文件在解压后的路径"""
-    if getattr(sys, "frozen", False):
-        return path
-    else:
+    """获取一个随代码打包的文件在解压后的路径
+
+    cx_Freeze 的 bdist_mac 会把资源放进 ``JavSP.app/Contents/Resources``，
+    因此 macOS 下不能简单依赖当前工作目录。
+    """
+    if not getattr(sys, "frozen", False):
         path_joined = Path(__file__).parent.parent / path
         return str(path_joined)
+
+    exe_dir = Path(sys.executable).resolve().parent
+    candidates = [exe_dir]
+    if sys.platform == 'darwin' and exe_dir.name == 'MacOS' and exe_dir.parent.name == 'Contents':
+        candidates.append(exe_dir.parent / 'Resources')
+    for base in candidates:
+        candidate = base / path
+        if candidate.exists():
+            return str(candidate)
+    return str(candidates[0] / path)
 
 
 def strftime_to_minutes(s: str) -> int:

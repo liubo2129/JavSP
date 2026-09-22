@@ -3,9 +3,13 @@ import random
 import string
 import shutil
 import subprocess
+import sys
 from glob import glob
 
+import pytest
 
+
+@pytest.mark.skipif(sys.platform != 'win32', reason='Windows executable test')
 def test_javsp_exe():
     cwd = os.getcwd()
     dist_dir = os.path.normpath(os.path.join(os.path.dirname(__file__) + '/../dist'))

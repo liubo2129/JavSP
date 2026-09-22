@@ -78,6 +78,8 @@ summarizer:
     # 影片、封面、nfo信息文件等的文件名将基于下面的规则来创建
     basename_pattern: '{num}'
     # 允许的最长文件路径（路径过长时将据此自动截短标题）
+    # Windows 建议保持 250 左右；macOS 可设置更大的总路径值，
+    # 单个文件名仍会按 255 个 UTF-8 字节限制自动检查。
     length_maximum: 250
     # 是否以字节数来计算文件路径长度
     length_by_byte: true

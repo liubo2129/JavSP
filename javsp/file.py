@@ -177,7 +177,9 @@ def replace_illegal_chars(name):
                    '*': '꘎'}
         for c, rep in charmap.items():
             name = name.replace(c, rep)
-    elif platform == "darwin":  # MAC OS X
+    elif platform == "darwin":  # macOS
+        # macOS 的 POSIX 层同样不允许文件名中出现 '/'，冒号也需要统一替换
+        name = name.replace('/', '／')
         name = name.replace(':', '：')
     else:   # 其余都当做Linux处理
         name = name.replace('/', '／')
@@ -199,12 +201,21 @@ def is_remote_drive(path: str):
 
 
 def get_remaining_path_len(path):
-    """计算当前系统支持的最大路径长度与给定路径长度的差值"""
-    #TODO: 支持不同的操作系统
+    """计算当前系统支持的最大路径长度与给定路径长度的差值
+
+    Windows 的历史限制约为 260 个字符；macOS/APFS 的主要限制是单个
+    文件名组件不能超过 255 字节，因此这里同时检查总路径和 basename。
+    """
     fullpath = os.path.abspath(path)
-    # Windows: If the length exceeds ~256 characters, you will be able to see the path/files via Windows/File Explorer, but may not be able to delete/move/rename these paths/files
+    # Windows: If the length exceeds ~256 characters, you will be able to see
+    # the path/files via Windows/File Explorer, but may not be able to
+    # delete/move/rename these paths/files.
     length = len(fullpath.encode('utf-8')) if Cfg().summarizer.path.length_by_byte else len(fullpath)
     remaining = Cfg().summarizer.path.length_maximum - length
+    if platform == 'darwin':
+        # APFS/HFS+ 单文件名的保守限制按 255 个 UTF-8 字节处理
+        basename = os.path.basename(fullpath)
+        remaining = min(remaining, 255 - len(basename.encode('utf-8')))
     return remaining
 
 
@@ -249,5 +260,5 @@ def find_subtitle_in_dir(folder: str, dvdid: str):
 
 
 if __name__ == "__main__":
-    p = "C:/Windows\\System32//PerceptionSimulation\\..\\Assets\\/ClosedHand.png"
+    p = os.path.join('path', 'to', 'video', 'ABC-123.mp4')
     print(get_remaining_path_len(p))

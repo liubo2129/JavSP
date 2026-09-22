@@ -1,17 +1,76 @@
 import os
 import re
 import sys
+
+# cx_Freeze 冻结后，multiprocessing 的 spawn helper（如 resource_tracker）
+# 会用当前可执行文件加 `-c` 重新启动自身；此时直接执行 helper 并退出，
+# 避免被 argparse 的 `-c/--config` 参数误解析。
+if (getattr(sys, 'frozen', False)
+        and len(sys.argv) >= 3
+        and sys.argv[-2] == '-c'
+        and sys.argv[-1].startswith('from multiprocessing.')):
+    exec(sys.argv[-1])
+    sys.exit(0)
+
 import json
 import time
 import logging
+import subprocess
+import tempfile
+from pathlib import Path
+
+
+def _prepare_standard_streams():
+    """Finder 启动时可能没有 stdout/stderr，补成 devnull 避免 print/log 崩溃"""
+    for name in ('stdout', 'stderr'):
+        stream = getattr(sys, name)
+        if stream is None:
+            setattr(sys, name, open(os.devnull, 'w', encoding='utf-8'))
+        else:
+            try:
+                stream.reconfigure(encoding='utf-8')
+            except (AttributeError, ValueError, OSError):
+                pass
+
+
+def _configure_finder_logging():
+    """非终端环境下写日志文件，方便从 Finder 启动时排查问题"""
+    if sys.platform != 'darwin':
+        return None
+    try:
+        has_tty = sys.stderr is not None and sys.stderr.isatty()
+    except (AttributeError, ValueError):
+        has_tty = False
+    if has_tty:
+        return None
+
+    root_logger = logging.getLogger()
+    for log_dir in (Path.home() / 'Library' / 'Logs' / 'JavSP',
+                    Path(tempfile.gettempdir()) / 'JavSP'):
+        try:
+            log_dir.mkdir(parents=True, exist_ok=True)
+            log_file = log_dir / 'JavSP.log'
+            handler = logging.FileHandler(log_file, encoding='utf-8')
+        except OSError:
+            continue
+        handler.setLevel(logging.INFO)
+        handler.setFormatter(logging.Formatter(
+            '%(asctime)s [%(levelname)s] %(name)s: %(message)s'))
+        root_logger.addHandler(handler)
+        root_logger.setLevel(logging.INFO)
+        return str(log_file)
+    return None
+
+
+_prepare_standard_streams()
+_FINDER_LOG_FILE = _configure_finder_logging()
+
 from PIL import Image
 from pydantic import ValidationError
 from pydantic_extra_types.pendulum_dt import Duration
 import requests
 import threading
 from typing import Dict, List
-
-sys.stdout.reconfigure(encoding='utf-8')
 
 import colorama
 import pretty_errors
@@ -33,6 +92,8 @@ for handler in root_logger.handlers:
         handler.stream = TqdmOut
 
 logger = logging.getLogger('main')
+if _FINDER_LOG_FILE:
+    logger.info('未检测到终端，日志将写入: %s', _FINDER_LOG_FILE)
 
 
 from javsp.lib import resource_path
@@ -47,6 +108,13 @@ from javsp.web.translate import translate_movie_info
 
 from javsp.config import Cfg, CrawlerID
 from javsp.prompt import prompt
+from javsp.ui import (
+    show_error_and_exit,
+    show_macos_alert,
+    show_macos_notification,
+    stderr_is_tty,
+    stdin_is_tty,
+)
 
 actressAliasMap = {}
 
@@ -488,12 +556,12 @@ def RunNormalMode(all_movies):
                 scrape_interval = Cfg().summarizer.extra_fanarts.scrap_interval.total_seconds()
                 inner_bar.set_description('下载剧照')
                 if movie.info.preview_pics:
-                    extrafanartdir = movie.save_dir + '/extrafanart'
+                    extrafanartdir = os.path.join(movie.save_dir, 'extrafanart')
                     os.mkdir(extrafanartdir)
                     for (id, pic_url) in enumerate(movie.info.preview_pics):
                         inner_bar.set_description(f"Downloading extrafanart {id} from url: {pic_url}")
                                                                                                                                 
-                        fanart_destination = f"{extrafanartdir}/{id}.png"
+                        fanart_destination = os.path.join(extrafanartdir, f'{id}.png')
                         try:
                             info = download(pic_url, fanart_destination)
                             if valid_pic(fanart_destination):
@@ -580,16 +648,57 @@ def get_pic_path(fanart_path, url):
 def error_exit(success, err_info):
     """检查业务逻辑是否成功完成，如果失败则报错退出程序"""
     if not success:
-        logger.error(err_info)
-        sys.exit(1)
+        show_error_and_exit(err_info)
+
+
+def _should_run_in_background():
+    """macOS 上从 Finder 直接启动 .app 时，主流程放到后台执行"""
+    return (
+        sys.platform == 'darwin'
+        and os.environ.get('JAVSP_BACKGROUND_WORKER') != '1'
+        and not stdin_is_tty()
+    )
+
+
+def _build_worker_command(root: str):
+    """构造后台 worker 的启动命令"""
+    cmd = [sys.executable]
+    if not getattr(sys, 'frozen', False):
+        cmd += ['-m', 'javsp']
+    # 继承父进程原有的 -c/--o... 参数；后面的同名参数会覆盖前面的值
+    cmd += sys.argv[1:]
+    cmd += [
+        '--oscanner.input_directory', root,
+        '--oother.check_update', 'false',
+    ]
+    return cmd
+
+
+def _spawn_background_worker(root: str):
+    """启动后台整理进程，父进程随后立即退出，避免前台转圈"""
+    env = os.environ.copy()
+    env['JAVSP_BACKGROUND_WORKER'] = '1'
+    cmd = _build_worker_command(root)
+    logger.info('启动后台整理进程: %s', root)
+    try:
+        subprocess.Popen(
+            cmd,
+            env=env,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+    except OSError as e:
+        show_error_and_exit(f'无法启动后台整理进程: {e}')
+    show_macos_notification('JavSP 已在后台开始整理，完成后会弹窗通知。')
 
 
 def entry():
     try:
         Cfg()
     except ValidationError as e:
-        print(e.errors())
-        exit(1)
+        show_error_and_exit(f'配置校验失败: {e.errors()}')
 
     global actressAliasMap
     if Cfg().crawler.normalize_actress_name:
@@ -599,12 +708,22 @@ def entry():
 
     colorama.init(autoreset=True)
 
-    # 检查更新
-    version_info = 'JavSP ' + getattr(sys, 'javsp_version', '未知版本/从代码运行')
-    logger.debug(version_info.center(60, '='))
-    check_update(Cfg().other.check_update, Cfg().other.auto_update)
+    # Finder 直接启动时，父进程只负责选目录和拉起后台 worker，
+    # 检查更新等耗时操作留给后台 worker 或直接跳过。
+    run_in_background = _should_run_in_background()
+    if not run_in_background:
+        # 检查更新
+        version_info = 'JavSP ' + getattr(sys, 'javsp_version', '未知版本/从代码运行')
+        logger.debug(version_info.center(60, '='))
+        check_update(Cfg().other.check_update, Cfg().other.auto_update)
+
     root = get_scan_dir(Cfg().scanner.input_directory)
     error_exit(root, '未选择要扫描的文件夹')
+
+    if run_in_background:
+        _spawn_background_worker(root)
+        sys.exit(0)
+
     # 导入抓取器，必须在chdir之前
     import_crawlers()
     os.chdir(root)
@@ -617,9 +736,20 @@ def entry():
     logger.info(f'扫描影片文件：共找到 {movie_count} 部影片')
     if Cfg().scanner.manual:
         reviewMovieID(recognized, root)
-    RunNormalMode(recognized + recognize_fail)
+    finished_movies = RunNormalMode(recognized + recognize_fail)
 
+    if sys.platform == 'darwin' and not stderr_is_tty():
+        show_macos_alert(f'整理完成，共处理 {len(finished_movies)} 部影片。')
     sys.exit(0)
 
+
 if __name__ == "__main__":
-    entry()
+    try:
+        entry()
+    except SystemExit:
+        raise
+    except KeyboardInterrupt:
+        sys.exit(130)
+    except Exception as e:
+        logger.exception('运行出错')
+        show_error_and_exit(f'运行出错: {e}')

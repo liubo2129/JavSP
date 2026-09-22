@@ -1,4 +1,5 @@
 """与操作nfo文件相关的功能"""
+import os
 from lxml.etree import tostring
 from lxml.builder import E
 
@@ -117,5 +118,5 @@ def write_nfo(info: MovieInfo, nfo_file):
 if __name__ == "__main__":
     import pretty_errors
     pretty_errors.configure(display_link=True)
-    info = MovieInfo(from_file=R'unittest\data\IPX-177 (javbus).json')
+    info = MovieInfo(from_file=os.path.join('unittest', 'data', 'IPX-177 (javbus).json'))
     write_nfo(info)

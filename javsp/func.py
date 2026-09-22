@@ -9,7 +9,6 @@ import shutil
 import zipfile
 import logging
 import subprocess
-import platform
 from datetime import datetime
 from packaging import version
 from colorama import Style
@@ -27,6 +26,7 @@ from javsp.web.base import *
 from javsp.lib import re_escape, resource_path
 
 from javsp.prompt import prompt
+from javsp.ui import show_error_and_exit
 
 __all__ = ['select_folder', 'get_scan_dir', 'remove_trail_actor_in_title',
            'shutdown', 'CLEAR_LINE', 'check_update', 'split_by_punc']
@@ -36,15 +36,41 @@ CLEAR_LINE = '\r\x1b[K'
 logger = logging.getLogger(__name__)
 
 
+def select_folder_macos():
+    """使用 AppleScript 打开原生目录选择框，供没有 tkinter 的 macOS 环境使用"""
+    try:
+        result = subprocess.run(
+            ['osascript', '-e',
+             'POSIX path of (choose folder with prompt "请选择要整理的文件夹")'],
+            capture_output=True, timeout=300,
+            text=True, encoding='utf-8', errors='replace')
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if result.returncode == 0 and result.stdout.strip():
+        return os.path.normpath(result.stdout.strip())
+    return None
+
+
 def select_folder(default_dir=''):
     """使用文件对话框提示用户选择一个文件夹"""
     if not USE_GUI:
+        if sys.platform == 'darwin':
+            path = select_folder_macos()
+            if path:
+                return path
         logger.error("无法打开窗口，请通过命令行的方式输入扫描路径")
         exit(1)
     window = Tk()
     window.withdraw()
-    window.iconbitmap(resource_path('image/JavSP.ico'))
-    path = filedialog.askdirectory(initialdir=default_dir)
+    try:
+        if sys.platform == 'win32':
+            window.iconbitmap(resource_path('image/JavSP.ico'))
+        path = filedialog.askdirectory(initialdir=default_dir or str(Path.home()))
+    finally:
+        try:
+            window.destroy()
+        except Exception:
+            pass
     if path != '':
         return os.path.normpath(path)
 
@@ -56,13 +82,15 @@ def get_scan_dir(cfg_scan_dir: Path | None) -> str | None:
         if cfg_scan_dir.exists():
             return str(cfg_scan_dir)
         else:
-            logger.error(f"配置的待整理文件夹无效：'{cfg_scan_dir}'")
+            show_error_and_exit(f"配置的待整理文件夹无效：'{cfg_scan_dir}'")
     else:
-        if platform.system().lower() == 'windows':
+        if sys.platform in ('win32', 'darwin'):
             print('请选择要整理的文件夹：', end='')
             root = select_folder()
         else:
             root = prompt('请选择要整理的文件夹路径，必须是绝对路径: ', "要整理的文件夹")
+        if not root:
+            show_error_and_exit('未选择要扫描的文件夹')
         print(root)
         return root
 
@@ -91,8 +119,15 @@ def shutdown(timeout=120):
             print(CLEAR_LINE + f"JavSP整理完成，将在 {i} 秒后关机。按'Ctrl+C'取消", end='')
             time.sleep(1)
         logger.info('整理完成，自动关机')
-        #TODO: 当前仅支持Windows平台
-        os.system('shutdown -s')
+        if sys.platform == 'win32':
+            subprocess.run(['shutdown', '/s', '/t', '0'], check=False)
+        elif sys.platform == 'darwin':
+            subprocess.run(
+                ['osascript', '-e',
+                 'tell application "System Events" to shut down'],
+                check=False)
+        else:
+            subprocess.run(['systemctl', 'poweroff'], check=False)
     except KeyboardInterrupt:
         return
 
@@ -250,9 +285,25 @@ def download_update(rel_info):
     Args:
         rel_info (json): 调用Github API得到的最新版的release信息
     """
+    if sys.platform == 'darwin':
+        # 当前下载器按“可执行文件目录”方式覆盖更新，不能安全替换正在运行的
+        # JavSP.app，因此 macOS 暂不自动替换，仅提示手动更新。
+        logger.warning('macOS 暂不支持自动替换当前 .app，请手动下载新版本后替换')
+        return
     if rel_info.get('assets') and getattr(sys, 'frozen', False):
-        down_url = rel_info['assets'][0]['browser_download_url']
-        asset_name = rel_info['assets'][0]['name']
+        assets = rel_info['assets']
+        if sys.platform == 'win32':
+            asset = next(
+                (a for a in assets
+                 if a.get('name', '').lower().endswith('.zip')),
+                None)
+        else:
+            asset = assets[0] if assets else None
+        if asset is None:
+            logger.warning('未找到适合当前平台的更新包，请手动下载更新')
+            return
+        down_url = asset['browser_download_url']
+        asset_name = asset['name']
         desc = '下载更新' if shutil.get_terminal_size().columns < 120 else '下载更新: '+asset_name
         download(down_url, asset_name, desc=desc)
         if os.path.exists(asset_name):
