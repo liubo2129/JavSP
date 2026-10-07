@@ -19,6 +19,10 @@ pillow = "10.2.0"
 pretty-errors = "1.2.19"
 requests = "2.31.0"
 tqdm = "4.59.0"
+# javsp/func.py 使用 packaging.version 做版本比较，此前仅靠传递依赖才存在。
+# 下限须满足 cx-freeze（dev 依赖）的 packaging>=25.0，否则 cx-freeze 会把
+# 已安装的 packaging 降级，导致构建环境与运行环境版本不一致。
+packaging = ">=25.0"
 # https://stackoverflow.com/questions/446209/possible-values-from-sys-platform
 pywin32 = {version = "^306", markers = "sys_platform == 'win32'"}
 pywin32-ctypes = {version = "^0.2.2", markers = "sys_platform == 'win32'"}
@@ -29,10 +33,14 @@ confz = "^2.0.1"
 pydantic-extra-types = "^2.9.0"
 pendulum = "^3.0.0"
 slimeface = "^2024.9.27"
+# 桌面窗口界面（P0.5 spike 已验证可被 cx_Freeze 正确打包）
+pywebview = "^6.2"
 
 [tool.poetry.scripts]
 javsp = "javsp.__main__:entry"
-server = "javsp.server:entry"
+# GUI 进程拉起抓取子进程时使用的事件上报入口（见 javsp/worker.py）。
+# 原先是 `server = "javsp.server:entry"`，但 javsp/server.py 一直不存在。
+worker = "javsp.worker:entry"
 
 [[tool.poetry.source]]
 name = "mirrors"
@@ -43,7 +51,7 @@ priority = "primary"
 [tool.poetry.group.dev.dependencies]
 pytest = "^8.1.1"
 flake8 = "^7.0.0"
-cx-freeze = "^7.2.2"
+cx-freeze = "^8.7"
 types-lxml = "^2024.4.14"
 types-pillow = "^10.2.0.20240822"
 

@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <title>JavSP Spike</title>
+  <style>
+    body { font: 14px/1.6 -apple-system, "Helvetica Neue", sans-serif; margin: 24px; }
+    #bar { background:#eee; border-radius:6px; height:14px; overflow:hidden; }
+    #fill { background:#3b82f6; height:100%; width:0; transition:width .3s; }
+    code { background:#f5f5f5; padding:1px 4px; border-radius:3px; }
+  </style>
+</head>
+<body>
+  <h2>JavSP pywebview spike</h2>
+  <div id="bar"><div id="fill"></div></div>
+  <p id="status">等待后台线程推送…</p>
+  <ul id="log"></ul>
+  <script>
+    const fill = document.getElementById('fill');
+    const status = document.getElementById('status');
+    const listEl = document.getElementById('log');
+    // 供 Python 端 evaluate_js 调用
+    window.pushProgress = (i, total, step) => {
+      fill.style.width = (i / total * 100) + '%';
+      status.textContent = `进度 ${i}/${total} — ${step}`;
+      const li = document.createElement('li');
+      li.textContent = `pushProgress(${i}, ${total}, '${step}')`;
+      listEl.appendChild(li);
+    };
+    window.markDone = (tag) => {
+      status.textContent = '完成: ' + tag;
+      document.title = 'SPIKE-JS-OK-' + tag;
+    };
+  </script>
+</body>
+</html>

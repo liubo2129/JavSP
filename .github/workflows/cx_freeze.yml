@@ -64,6 +64,57 @@ jobs:
             poetry run python setup.py build_exe -b dist
           fi
 
+      # GUI 的静态前端资源必须通过 setup.py 的 include_files 分发：
+      # resource_path() 只能解析 exe 目录或 Contents/Resources，若漏配
+      # 前端会在运行时 404（窗口空白），而构建本身不会报错。
+      - name: Verify bundled GUI assets
+        shell: bash
+        run: |
+          set -e
+          if [[ "$RUNNER_OS" == "macOS" ]]; then
+            RES="build/JavSP.app/Contents/Resources"
+          else
+            RES="dist"
+          fi
+          echo "检查资源目录: $RES"
+          for f in index.html app.js style.css; do
+            if [[ ! -f "$RES/webui/$f" ]]; then
+              echo "::error::缺少 GUI 资源 $RES/webui/$f（检查 setup.py 的 include_files）"
+              exit 1
+            fi
+            echo "OK: webui/$f"
+          done
+
+      # 冻结产物必须能承担三个角色（CLI / --gui / --javsp-worker）。
+      # 这里只做无窗口的冒烟测试：确认模块被正确打包且能启动。
+      - name: Smoke test frozen binary
+        shell: bash
+        run: |
+          set -e
+          if [[ "$RUNNER_OS" == "macOS" ]]; then
+            BIN="build/JavSP.app/Contents/MacOS/JavSP"
+          elif [[ "$RUNNER_OS" == "Windows" ]]; then
+            BIN="dist/JavSP.exe"
+          else
+            BIN="dist/JavSP"
+          fi
+          echo "测试 $BIN"
+          "$BIN" -h
+          # 以 worker 身份运行，指向一个空目录：应输出事件流并以非零退出
+          # （未找到影片），而不是崩溃。这一条能同时验证 events/worker 模块
+          # 被正确打包、且角色派发没有循环导入。
+          EMPTY="$(mktemp -d)"
+          set +e
+          "$BIN" --javsp-worker --oscanner.input_directory "$EMPTY" \
+            --oscanner.manual false --oother.check_update false > worker.out 2>worker.err
+          RC=$?
+          set -e
+          echo "worker 退出码=$RC"
+          grep -q '"kind"' worker.out || { echo "::error::worker 未输出事件流"; cat worker.err; exit 1; }
+          grep -q 'scan.started' worker.out || { echo "::error::worker 缺少 scan.started 事件"; cat worker.err; exit 1; }
+          echo "OK: worker 角色派发与事件流正常"
+
+
       - name: Set VERSION variable
         shell: bash
         run: |
