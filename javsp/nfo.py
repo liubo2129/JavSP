@@ -1,5 +1,6 @@
 """与操作nfo文件相关的功能"""
 import os
+from lxml import etree
 from lxml.etree import tostring
 from lxml.builder import E
 
@@ -113,6 +114,77 @@ def write_nfo(info: MovieInfo, nfo_file):
     with open(nfo_file, 'wt', encoding='utf-8') as f:
         f.write(tostring(nfo, encoding='unicode', pretty_print=True,
                          doctype='<?xml version="1.0" encoding="UTF-8" standalone="yes" ?>'))
+
+
+def read_nfo(nfo_file: str) -> dict:
+    """读取 nfo 文件并返回结构化数据（write_nfo 的逆操作）
+
+    供界面展示"整理后的影片信息"用。只提取界面需要的字段，多值字段统一
+    返回列表，缺失字段返回 None / []，调用方无需再做存在性判断。
+    """
+    parser = etree.XMLParser(recover=True, resolve_entities=False)
+    tree = etree.parse(nfo_file, parser=parser)
+    root = tree.getroot()
+
+    def one(tag: str) -> str | None:
+        el = root.find(tag)
+        if el is None or el.text is None:
+            return None
+        text = el.text.strip()
+        return text or None
+
+    def many(tag: str) -> list:
+        # 用 xpath 而非 findall：lxml 的 ElementPath 不支持 'tag/text()' 写法
+        return [t.strip() for t in root.xpath(f'{tag}/text()') if t and t.strip()]
+
+    # uniqueid 用 type 区分 DVD ID 与 CID
+    uniqueids = {}
+    for el in root.findall('uniqueid'):
+        kind = el.get('type') or 'other'
+        if el.text:
+            uniqueids[kind] = el.text.strip()
+
+    # actor 可能带 thumb（女优头像链接）
+    actresses = []
+    for el in root.findall('actor'):
+        name_el = el.find('name')
+        if name_el is None or not name_el.text:
+            continue
+        thumb_el = el.find('thumb')
+        actresses.append({
+            'name': name_el.text.strip(),
+            'thumb': (thumb_el.text or '').strip() if thumb_el is not None else None,
+        })
+
+    set_el = root.find('set/name')
+
+    def int_or_none(value):
+        try:
+            return int(str(value).split('.')[0])
+        except (TypeError, ValueError):
+            return None
+
+    return {
+        'title': one('title'),
+        'original_title': one('originaltitle'),
+        'plot': one('plot'),
+        'rating': one('rating'),
+        'runtime': int_or_none(one('runtime')),
+        'mpaa': one('mpaa'),
+        'premiered': one('premiered'),
+        'studio': one('studio'),
+        'director': one('director'),
+        'country': one('country'),
+        'trailer': one('trailer'),
+        'series': set_el.text.strip() if set_el is not None and set_el.text else None,
+        'dvdid': uniqueids.get('num'),
+        'cid': uniqueids.get('cid'),
+        'genres': many('genre'),
+        'tags': many('tag'),
+        'actresses': actresses,
+        'nfo_file': os.path.abspath(nfo_file),
+        'nfo_mtime': os.path.getmtime(nfo_file),
+    }
 
 
 if __name__ == "__main__":
