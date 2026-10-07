@@ -4,6 +4,7 @@
 import os
 import re
 import sys
+import json
 import time
 import shutil
 import zipfile
@@ -36,12 +37,19 @@ CLEAR_LINE = '\r\x1b[K'
 logger = logging.getLogger(__name__)
 
 
-def select_folder_macos():
-    """使用 AppleScript 打开原生目录选择框，供没有 tkinter 的 macOS 环境使用"""
+def select_folder_macos(prompt_dir=''):
+    """使用 AppleScript 打开原生目录选择框，供没有 tkinter 的 macOS 环境使用
+
+    Args:
+        prompt_dir: 可选的默认起始目录
+    """
+    script = 'POSIX path of (choose folder with prompt "请选择要整理的文件夹"'
+    if prompt_dir:
+        script += f' default location POSIX file {json.dumps(prompt_dir, ensure_ascii=False)}'
+    script += ')'
     try:
         result = subprocess.run(
-            ['osascript', '-e',
-             'POSIX path of (choose folder with prompt "请选择要整理的文件夹")'],
+            ['osascript', '-e', script],
             capture_output=True, timeout=300,
             text=True, encoding='utf-8', errors='replace')
     except (OSError, subprocess.TimeoutExpired):
@@ -51,11 +59,22 @@ def select_folder_macos():
     return None
 
 
-def select_folder(default_dir=''):
-    """使用文件对话框提示用户选择一个文件夹"""
+def select_folder(default_dir='', use_macos_dialog=False):
+    """使用文件对话框提示用户选择一个文件夹
+
+    Args:
+        default_dir: 默认起始目录
+        use_macos_dialog: macOS 上强制使用 osascript 对话框。
+
+            这一点对 GUI 模式是必须的：GUI 的窗口已由 pywebview 独占主线程，
+            而 Tk 的 filedialog 要求在主线程运行，且 Tk 的主循环与 pywebview
+            的事件循环互相冲突。osascript 走独立进程，不占用主线程。
+    """
+    if sys.platform == 'darwin' and use_macos_dialog:
+        return select_folder_macos(default_dir)
     if not USE_GUI:
         if sys.platform == 'darwin':
-            path = select_folder_macos()
+            path = select_folder_macos(default_dir)
             if path:
                 return path
         logger.error("无法打开窗口，请通过命令行的方式输入扫描路径")
@@ -207,9 +226,15 @@ def check_update(allow_check=True, auto_update=True):
         print('=' * display_width)
         print('')
 
-    # 使用pyinstaller打包exe时生成hook，运行时由该hook将版本信息注入到sys中
-    local_version = meta.version('javsp')
-    if local_version == "":
+    # 版本号优先取自安装元数据：打包（cx_Freeze 依据 setup(name='javsp') 生成）时存在。
+    # 从源码直接运行时没有 dist-info，importlib.metadata 会抛 PackageNotFoundError，
+    # 因此这里必须兜底，否则每次运行都在最开头崩溃。
+    local_version = getattr(sys, 'javsp_version', '')
+    try:
+        local_version = meta.version('javsp') or local_version
+    except meta.PackageNotFoundError:
+        logger.debug('未找到 javsp 的安装元数据，跳过版本检查')
+    if not local_version:
         return
     # 检查更新
     if allow_check:
