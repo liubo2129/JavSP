@@ -113,6 +113,37 @@ def main() -> int:
     status, res = post(server, '/api/scan', {'directory': '/nonexistent-xyz'})
     check('不存在目录被拒绝', res.get('error') == 'not_found', str(res))
 
+    # --- 设置接口 ---
+    print('[*] 设置：抓取器开关')
+    status, raw = get(server, '/api/settings', token=server.token)
+    settings = json.loads(raw.decode('utf-8'))
+    check('GET /api/settings 可用', status == 200 and settings.get('ok') is True)
+    groups = settings.get('groups', [])
+    check('返回全部分组', {g['key'] for g in groups} ==
+          {'normal', 'fc2', 'cid', 'getchu', 'gyutto'}, str([g['key'] for g in groups]))
+    all_ids = [c['id'] for g in groups for c in g['crawlers']]
+    # 界面上必须能列出全部站点，一个都不能漏（历史上 config.yml 漏配过 5 个）
+    check('列出全部 19 个站点', len(set(all_ids)) == 19, f'实际 {len(set(all_ids))} 个')
+    check('孤儿站点默认关闭',
+          all(not c['enabled'] for g in groups for c in g['crawlers']
+              if c['id'] in ('njav', 'avwiki', 'arzon', 'arzon_iv', 'fc2fan')))
+    # 不允许出现"该类型必然失败"的空组
+    status, res = post(server, '/api/settings/crawler_selection', {'selection': {'normal': []}})
+    check('空组被拒绝', res.get('error') == 'empty_group', str(res))
+    status, res = post(server, '/api/settings/crawler_selection',
+                       {'selection': {'normal': ['javdb', '不存在的站点']}})
+    check('未知站点被拒绝', res.get('error') == 'unknown_crawler', str(res))
+    status, res = post(server, '/api/settings/crawler_selection',
+                       {'selection': {'normal': ['jav321']}})
+    check('合法设置可保存', res.get('ok') is True, str(res))
+    status, raw = get(server, '/api/settings', token=server.token)
+    after = json.loads(raw.decode('utf-8'))
+    normal = next(g for g in after['groups'] if g['key'] == 'normal')
+    enabled = [c['id'] for c in normal['crawlers'] if c['enabled']]
+    check('保存后可读回', enabled == ['jav321'], str(enabled))
+    # 恢复出厂设置，避免影响后续用例
+    post(server, '/api/settings/crawler_selection', {'selection': settings['defaults']})
+
     # --- SSE 订阅 ---
     events: list[dict] = []
     stop = threading.Event()

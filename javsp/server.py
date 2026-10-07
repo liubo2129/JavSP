@@ -32,6 +32,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 from urllib.parse import parse_qs, urlparse
 
+from javsp.config import Cfg
 from javsp.events import Event, read_events
 from javsp.lib import resource_path
 
@@ -171,6 +172,11 @@ class _Handler(BaseHTTPRequestHandler):
                 return
             self._send_json(self.state.snapshot())
             return
+        if route == '/api/settings':
+            if not self._check_token():
+                return
+            self._send_json(self.state.get_settings())
+            return
         if route == '/api/image':
             if not self._check_token():
                 return
@@ -208,6 +214,9 @@ class _Handler(BaseHTTPRequestHandler):
         elif route == '/api/start_by_id':
             self._send_json(self.state.start_by_id(
                 body.get('folder') or '', body.get('ids') or ''))
+        elif route == '/api/settings/crawler_selection':
+            self._send_json(self.state.update_crawler_selection(
+                body.get('selection') or {}))
         elif route == '/api/stop':
             self._send_json(self.state.stop())
         elif route == '/api/log_tail':
@@ -800,6 +809,10 @@ class GuiServer:
             env['JAVSP_BACKGROUND_WORKER'] = '1'
             env['JAVSP_WORKER_MODE'] = '1'
             env['PYTHONIOENCODING'] = 'utf-8'
+            # 显式指定设置文件，保证父子进程读写同一份（否则 worker 会按
+            # 默认路径找，若 GUI 用 JAVSP_SETTINGS_FILE 覆盖过就会不一致）
+            from javsp.settings import settings_path
+            env['JAVSP_SETTINGS_FILE'] = str(settings_path())
             if mode == 'scan':
                 env['JAVSP_SCAN_ONLY'] = '1'
             else:
@@ -853,6 +866,105 @@ class GuiServer:
         # 记录目录：前端拿它当图片接口的 root，也是"当前任务目录"的唯一来源
         self._remember_directory(directory)
         return self._spawn(os.path.abspath(directory), 'scan')
+
+    # ---------- 设置 ----------
+
+    def get_settings(self) -> Dict[str, Any]:
+        """返回设置界面需要的全部信息
+
+        站点清单由服务端生成（枚举 + 出厂默认表），前端不硬编码，
+        避免两处清单再次漂移——历史上 config.yml 就漏配过 5 个抓取器。
+        """
+        from javsp.settings import (
+            GROUP_LABELS, all_crawlers_by_group, default_enabled_by_group,
+            load_crawler_selection, settings_path,
+        )
+
+        saved = load_crawler_selection()
+        defaults = default_enabled_by_group()
+        by_group = all_crawlers_by_group()
+
+        def is_available(name: str) -> tuple:
+            """站点是否可用；fc2fan 依赖本地镜像路径"""
+            if name == 'fc2fan':
+                path = Cfg().crawler.fc2fan_local_path
+                if not (path and os.path.isdir(str(path))):
+                    return False, '需要先在 config.yml 配置 fc2fan 的本地镜像路径'
+            return True, ''
+
+        groups = []
+        for group in by_group:
+            # 用户没保存过该组时，回落到出厂默认
+            enabled = set(saved.get(group) or defaults.get(group) or [])
+            items = []
+            for name in by_group[group]:
+                available, note = is_available(name)
+                items.append({
+                    'id': name,
+                    'enabled': name in enabled,
+                    'available': available,
+                    'note': note,
+                })
+            groups.append({
+                'key': group,
+                'label': GROUP_LABELS.get(group, group),
+                'crawlers': items,
+            })
+
+        return {
+            'ok': True,
+            'groups': groups,
+            'defaults': defaults,
+            'settings_file': str(settings_path()),
+        }
+
+    def update_crawler_selection(self, selection: Dict[str, Any]) -> Dict[str, Any]:
+        """保存抓取器开关
+
+        校验要点：
+
+        * 每组至少保留 1 个——否则该类型的影片必然找不到任何站点，
+          这类"保存后必然失败"的状态不该允许写入
+        * 站点 id 必须是已知的，未知项直接拒绝（而不是静默丢弃，
+          否则用户会以为已经保存成功）
+        """
+        from javsp.settings import (
+            GROUP_KEYS, all_crawlers_by_group, normalize_selection,
+            save_crawler_selection,
+        )
+        if not isinstance(selection, dict):
+            return {'ok': False, 'error': 'bad_payload',
+                    'message': 'selection 必须是对象'}
+
+        normalized = normalize_selection(selection)
+        by_group = all_crawlers_by_group()
+
+        # 未知站点：明确报错，避免"看起来保存了其实没有"
+        known = {name for names in by_group.values() for name in names}
+        unknown = [n for group in GROUP_KEYS for n in (selection.get(group) or [])
+                   if isinstance(n, str) and n not in known]
+        if unknown:
+            return {'ok': False, 'error': 'unknown_crawler',
+                    'message': f'未知的抓取器: {", ".join(sorted(set(unknown)))}'}
+
+        # 提交里出现的组必须至少留一个
+        empty = [g for g in GROUP_KEYS
+                 if g in selection and not normalized.get(g)]
+        if empty:
+            labels = ', '.join(empty)
+            return {'ok': False, 'error': 'empty_group',
+                    'message': f'分组不能一个都不选: {labels}'}
+
+        try:
+            path = save_crawler_selection(normalized)
+        except OSError as e:
+            logger.warning('保存设置失败: %s', e, exc_info=True)
+            return {'ok': False, 'error': 'save_failed',
+                    'message': f'无法写入设置文件: {e}'}
+
+        self._emit('gui.settings_changed', section='crawler_selection')
+        return {'ok': True, 'selection': normalized, 'settings_file': str(path),
+                'message': '设置已保存，将在下一次任务生效'}
 
     def start_by_id(self, folder: str, ids_text: str) -> Dict[str, Any]:
         """按番号获取元数据

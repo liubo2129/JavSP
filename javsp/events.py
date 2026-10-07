@@ -53,6 +53,8 @@ class EventKind:
     CRAWLER_RETRY = 'crawler.retry'
     # 资源下载
     DOWNLOAD_PROGRESS = 'download.progress'
+    # 设置
+    SETTINGS_APPLIED = 'settings.applied'
     # 自由日志
     LOG = 'log'
 

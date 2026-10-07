@@ -36,6 +36,8 @@ from typing import Any, Dict, List
 #   2. 让本入口能识别自己是被父进程拉起的 worker
 WORKER_ENV_FLAG = 'JAVSP_BACKGROUND_WORKER'
 
+logger = logging.getLogger('worker')
+
 # 供 __main__ 判断"是否应跳过写日志文件"的标记。必须在 import javsp.__main__
 # 之前设置，因为它是在模块导入期读取该变量的。
 WORKER_MODE_FLAG = 'JAVSP_WORKER_MODE'
@@ -102,6 +104,7 @@ def _run_by_id(sink, ids: List[str], folder: str) -> int:
     from javsp.events import EventKind
     from javsp.__main__ import RunNormalMode, import_crawlers, movie_id_of
 
+    _apply_user_settings(sink)
     import_crawlers()
 
     movies = _build_by_id_movies(ids)
@@ -197,12 +200,37 @@ def _abs(path: str) -> str:
     return os.path.abspath(path)
 
 
+def _apply_user_settings(sink) -> None:
+    """把设置界面里的抓取器开关应用到 Cfg()
+
+    必须在 ``import_crawlers()`` 之前调用：那个函数按 ``crawler.selection``
+    导入模块，设置晚了只会影响后续的数据汇总，被禁用的站点仍会被抓取。
+
+    Cfg() 是 confz 单例（进程启动即从 argv 快照），运行期无法重新加载配置，
+    因此这里直接就地改写 ``cfg.crawler.selection`` 的各组属性。
+    """
+    from javsp.config import Cfg
+    from javsp.events import EventKind
+    from javsp.settings import load_crawler_selection, merge_into_config
+
+    saved = load_crawler_selection()
+    if not saved:
+        # 用户没动过设置，完整走 config.yml 的出厂配置
+        return
+    merge_into_config(Cfg().crawler.selection, saved)
+    logger.info('已应用用户设置的抓取器开关: %s',
+                ', '.join(f'{g}={len(v)}' for g, v in saved.items()))
+    sink(EventKind.SETTINGS_APPLIED, crawler_selection=saved)
+
+
 def _run(root: str, sink) -> int:
     """扫描并整理，全程向 sink 上报事件"""
     from javsp.events import EventKind
     from javsp.config import Cfg
     from javsp.file import scan_movies
     from javsp.__main__ import RunNormalMode, import_crawlers
+
+    _apply_user_settings(sink)
 
     # 必须导入抓取器：parallel_crawler 是通过 sys.modules['javsp.web.<name>']
     # 取 parser 的，这些模块在配置里只是字符串，不 import 就不在 sys.modules 中。
