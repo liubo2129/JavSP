@@ -108,6 +108,13 @@ venv/
 ENV/
 env.bak/
 venv.bak/
+# uv 缓存目录（.envrc 会把它固定在工作区内）
+.uv-cache/
+# 本地抓取基线用的临时目录（合成的稀疏测试文件与运行日志）
+.baseline/
+# P0.5 spike 的冻结产物（体积大，可随时用 spike/setup.py 重建）
+spike/build/
+spike/*.egg-info/
 
 # Spyder project settings
 .spyderproject
@@ -134,3 +141,4 @@ ver_hook.py
 
 .idea
 .vscode
+.DS_Store
