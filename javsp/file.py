@@ -17,13 +17,25 @@ from javsp.avid import *
 from javsp.lib import re_escape
 from javsp.config import Cfg
 from javsp.datatype import Movie
+from javsp.events import EventKind
 
 logger = logging.getLogger(__name__)
 failed_items = []
 
+# 扫描大目录时逐文件上报事件会产生海量 JSON 行，因此按固定间隔抽样上报；
+# 进入新目录时无论如何都会上报一次，保证"当前在扫描哪个目录"始终是新的。
+_SCAN_PROGRESS_INTERVAL = 50
 
-def scan_movies(root: str) -> List[Movie]:
-    """获取文件夹内的所有影片的列表（自动探测同一文件夹内的分片）"""
+
+def scan_movies(root: str, sink=None) -> List[Movie]:
+    """获取文件夹内的所有影片的列表（自动探测同一文件夹内的分片）
+
+    Args:
+        root: 要扫描的根目录
+        sink: 可选的事件接收方。传入时会上报细粒度扫描进度，便于 GUI 展示
+              "正在扫描哪个目录、已发现多少个影片"。为 None 时不产生任何事件，
+              既有 CLI 行为不变。
+    """
     # 由于实现的限制: 
     # 1. 以数字编号最多支持10个分片，字母编号最多支持26个分片
     # 2. 允许分片间的编号有公共的前导符（如编号01, 02, 03），因为求prefix时前导符也会算进去
@@ -31,8 +43,16 @@ def scan_movies(root: str) -> List[Movie]:
     # 扫描所有影片文件并获取它们的番号
     dic = {}    # avid: [abspath1, abspath2...]
     small_videos = {}
+    # 扫描进度统计。目录路径不做 os.path.relpath，避免扫描深层大目录时
+    # 每个目录都产生一次相对路径计算的开销。
+    dir_count = 0
+    file_count = 0
+    video_count = 0
+    unrecognized = 0
+    last_reported_dir = None
     ignore_folder_name_pattern = re.compile('|'.join(Cfg().scanner.ignored_folder_name_pattern))
     for dirpath, dirnames, filenames in os.walk(root):
+        dir_count += 1
         for name in dirnames.copy():
             if ignore_folder_name_pattern.match(name):
                 dirnames.remove(name)
@@ -41,10 +61,24 @@ def scan_movies(root: str) -> List[Movie]:
                 if any(file.lower().endswith(".nfo") for file in os.listdir(os.path.join(dirpath, name)) if isinstance(file, str)):
                     print(f"skip file {name}")
                     dirnames.remove(name)
+        # 每进入一个新目录就上报一次，使侧边栏在遍历大量小文件时也能持续更新
+        if sink is not None and dirpath != last_reported_dir:
+            last_reported_dir = dirpath
+            sink(EventKind.SCAN_PROGRESS, phase='entering_dir', current_dir=dirpath,
+                 dir_count=dir_count, file_count=file_count,
+                 video_count=video_count, unrecognized=unrecognized)
 
         for file in filenames:
+            file_count += 1
+            # 扫描大目录时逐文件上报会产生海量事件，因此只在进入新目录
+            # 和每 N 个文件时上报一次
+            if sink is not None and file_count % _SCAN_PROGRESS_INTERVAL == 0:
+                sink(EventKind.SCAN_PROGRESS, phase='walking', current_dir=dirpath,
+                     dir_count=dir_count, file_count=file_count,
+                     video_count=video_count, unrecognized=unrecognized)
             ext = os.path.splitext(file)[1].lower()
             if ext in Cfg().scanner.filename_extensions:
+                video_count += 1
                 fullpath = os.path.join(dirpath, file)
                 # 忽略小于指定大小的文件
                 filesize = os.path.getsize(fullpath)
@@ -60,11 +94,25 @@ def scan_movies(root: str) -> List[Movie]:
                         dic[avid].append(fullpath)
                     else:
                         dic[avid] = [fullpath]
+                    # 识别到番号即上报，这是用户在侧边栏最想看到的进展
+                    if sink is not None:
+                        sink(EventKind.SCAN_PROGRESS, phase='recognized', avid=avid,
+                             current_dir=dirpath, file_count=file_count,
+                             video_count=video_count,
+                             movie_count=len(dic),
+                             unrecognized=unrecognized)
                 else:
+                    unrecognized += 1
                     fail = Movie('无法识别番号')
                     fail.files = [fullpath]
                     failed_items.append(fail)
                     logger.error(f"无法提取影片番号: '{fullpath}'")
+                    # 无法识别的文件也要上报，用以前端给出"需要人工介入"的提示
+                    if sink is not None:
+                        sink(EventKind.SCAN_PROGRESS, phase='unrecognized',
+                             path=fullpath, current_dir=dirpath,
+                             file_count=file_count, video_count=video_count,
+                             unrecognized=unrecognized)
     # 多分片影片容易有文件大小低于阈值的子片，进行特殊处理
     has_avid = {}
     for name in list(small_videos.keys()):
@@ -152,6 +200,13 @@ def scan_movies(root: str) -> List[Movie]:
         mov.data_src = src
         logger.debug(f'影片数据源类型: {avid}: {src}')
         movies.append(mov)
+    # 汇总上报，供前端把"扫描中"切成最终结果
+    if sink is not None:
+        sink(EventKind.SCAN_PROGRESS, phase='done',
+             dir_count=dir_count, file_count=file_count,
+             video_count=video_count, movie_count=len(movies),
+             unrecognized=unrecognized,
+             skipped_small=skipped_cnt)
     return movies
 
 

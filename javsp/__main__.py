@@ -2,6 +2,41 @@ import os
 import re
 import sys
 
+# 冻结后的单文件可执行程序需要承担三个角色（cx_Freeze 只产出这一个二进制）：
+#   --gui           桌面窗口
+#   无参数（Finder 双击）  也进入桌面窗口
+#   --javsp-worker  GUI 拉起的抓取子进程
+#   带其它参数      命令行刮削
+# 派发必须在**其它 import 之前**：worker 与 gui 模块有自己的导入需求，
+# 而本模块的导入带有全局副作用（替换 stdout、挂日志 handler 等）。
+#
+# 实际生效的调用点放在模块末尾（见 _ROLE_DISPATCH），因为 worker 需要
+# `from javsp.__main__ import RunNormalMode`，此刻本模块还在初始化，
+# 顶层导入会构成循环导入。
+if getattr(sys, 'frozen', False):
+    _want_gui = '--gui' in sys.argv[1:] or len(sys.argv) == 1
+    _want_worker = '--javsp-worker' in sys.argv[1:]
+    if _want_worker:
+        # multiprocessing spawn helper 的兜底守卫，优先于角色派发
+        if (len(sys.argv) >= 3 and sys.argv[-2] == '-c'
+                and sys.argv[-1].startswith('from multiprocessing.')):
+            exec(sys.argv[-1])
+            sys.exit(0)
+
+    def _dispatch_role() -> None:
+        if _want_worker:
+            # 延迟导入：本模块已执行完毕，worker 里的
+            # `from javsp.__main__ import RunNormalMode` 不再冲突
+            from javsp.worker import main as _worker_main
+            sys.exit(_worker_main())
+        if _want_gui:
+            from javsp.gui import entry as _gui_entry
+            _gui_entry()
+
+    _ROLE_DISPATCH = _dispatch_role
+else:
+    _ROLE_DISPATCH = None
+
 # cx_Freeze 冻结后，multiprocessing 的 spawn helper（如 resource_tracker）
 # 会用当前可执行文件加 `-c` 重新启动自身；此时直接执行 helper 并退出，
 # 避免被 argparse 的 `-c/--config` 参数误解析。
@@ -34,7 +69,14 @@ def _prepare_standard_streams():
 
 
 def _configure_finder_logging():
-    """非终端环境下写日志文件，方便从 Finder 启动时排查问题"""
+    """非终端环境下写日志文件，方便从 Finder 启动时排查问题
+
+    worker 模式（由 GUI 拉起的子进程）必须跳过：它的日志已经通过事件流
+    上报给父进程，再写一份文件既是重复，也会让 GUI 与 worker 争抢同一个
+    日志文件（P0.5 spike 实测：两个进程写同一文件会互相截断）。
+    """
+    if os.environ.get('JAVSP_WORKER_MODE') == '1':
+        return None
     if sys.platform != 'darwin':
         return None
     try:
@@ -83,6 +125,7 @@ pretty_errors.configure(display_link=True)
 
 from javsp.print import TqdmOut
 from javsp.cropper import Cropper, get_cropper
+from javsp.events import EventKind, NullSink
 
 
 # 将StreamHandler的stream修改为TqdmOut，以与Tqdm协同工作
@@ -146,37 +189,82 @@ def import_crawlers():
         logger.warning('配置的抓取器无效: ' + ', '.join(unknown_mods))
 
 
+def movie_id_of(movie) -> str:
+    """影片在事件流里的标识
+
+    不能用 ``str(movie)``：那样得到的是 ``Movie('ABP-647')``，
+    前端会把它原样当成番号显示。优先取真正的番号。
+    """
+    return movie.dvdid or movie.cid or '未知'
+
+
 # 爬虫是IO密集型任务，可以通过多线程提升效率
-def parallel_crawler(movie: Movie, tqdm_bar=None):
-    """使用多线程抓取不同网站的数据"""
+def parallel_crawler(movie: Movie, tqdm_bar=None, sink=None):
+    """使用多线程抓取不同网站的数据
+
+    Args:
+        movie: 待抓取的影片
+        tqdm_bar: 终端进度条（CLI 模式），可为 None
+        sink: 事件接收方（GUI/worker 模式），可为 None。为 None 时不产生事件，
+              既有 CLI 行为完全不变。
+    """
+    sink = sink if sink is not None else NullSink()
+
     def wrapper(parser, info: MovieInfo, retry):
         """对抓取器函数进行包装，便于更新提示信息和自动重试"""
         crawler_name = threading.current_thread().name
         task_info = f'Crawler: {crawler_name}: {info.dvdid}'
+        # 线程名形如 'javsp.web.javdb'，事件里用短名更便于前端展示
+        short_name = crawler_name.split('.')[-1]
+        sink(EventKind.CRAWLER_STARTED, crawler=short_name, movie_id=movie_id_of(movie))
         for cnt in range(retry):
             try:
                 parser(info)
                 movie_id = info.dvdid or info.cid
                 logger.debug(f"{crawler_name}: 抓取成功: '{movie_id}': '{info.url}'")
-                setattr(info, 'success', True)
+                # 抓取器可能"成功返回但没拿到数据"，站点实际未命中，需区分上报
+                found = bool(info.title or info.url)
+                if found:
+                    setattr(info, 'success', True)
+                    sink(EventKind.CRAWLER_SUCCEEDED, crawler=short_name,
+                         movie_id=str(movie_id) if movie_id else None,
+                         title=info.title)
+                else:
+                    sink(EventKind.CRAWLER_FAILED, crawler=short_name,
+                         error='no_data', message='站点未返回有效数据')
                 if isinstance(tqdm_bar, tqdm):
                     tqdm_bar.set_description(f'{crawler_name}: 抓取完成')
                 break
             except MovieNotFoundError as e:
                 logger.debug(e)
+                sink(EventKind.CRAWLER_FAILED, crawler=short_name,
+                     error='not_found', message=str(e))
                 break
             except MovieDuplicateError as e:
                 logger.exception(e)
+                sink(EventKind.CRAWLER_FAILED, crawler=short_name,
+                     error='duplicate', message=str(e))
                 break
             except (SiteBlocked, SitePermissionError, CredentialError) as e:
                 logger.error(e)
+                sink(EventKind.CRAWLER_FAILED, crawler=short_name,
+                     error='blocked', message=str(e))
                 break
             except requests.exceptions.RequestException as e:
                 logger.debug(f'{crawler_name}: 网络错误，正在重试 ({cnt+1}/{retry}): \n{repr(e)}')
+                sink(EventKind.CRAWLER_RETRY, crawler=short_name,
+                     attempt=cnt + 1, total=retry, error=type(e).__name__)
                 if isinstance(tqdm_bar, tqdm):
                     tqdm_bar.set_description(f'{crawler_name}: 网络错误，正在重试')
+                if cnt + 1 >= retry:
+                    # 重试次数用尽，此处若不上报失败，前端会一直显示"进行中"
+                    sink(EventKind.CRAWLER_FAILED, crawler=short_name,
+                         error=type(e).__name__, message=str(e))
             except Exception as e:
                 logger.exception(e)
+                sink(EventKind.CRAWLER_FAILED, crawler=short_name,
+                     error=type(e).__name__, message=str(e))
+                break
 
     # 根据影片的数据源获取对应的抓取器
     crawler_mods: List[CrawlerID] = Cfg().crawler.selection[movie.data_src]
@@ -386,21 +474,24 @@ def generate_names(movie: Movie):
         return
 
     copyd['num'] = copyd['num'] + movie.attr_str
-    longest_ext = max((os.path.splitext(i)[1] for i in movie.files), key=len)
+    # 按番号获取模式下没有输入文件，movie.files 为空；这里必须容错，
+    # 否则 max() 会对空序列抛 ValueError。
+    exts = [os.path.splitext(i)[1] for i in movie.files]
+    longest_ext = max(exts, key=len) if exts else ''
+    remaining = None
+    save_dir = None
+    basename = None
     for end in range(len(ori_title_break), 0, -1):
         copyd['rawtitle'] = replace_illegal_chars(''.join(ori_title_break[:end]).strip())
         for sub_end in range(len(title_break), 0, -1):
             copyd['title'] = replace_illegal_chars(''.join(title_break[:sub_end]).strip())
-            if Cfg().summarizer.move_files:
-                save_dir = os.path.normpath(Cfg().summarizer.path.output_folder_pattern.format(**copyd)).strip()
-                basename = os.path.normpath(Cfg().summarizer.path.basename_pattern.format(**copyd)).strip()
-            else:
-                # 如果不整理文件，则保存抓取的数据到当前目录
-                save_dir = os.path.dirname(movie.files[0])
-                filebasename = os.path.basename(movie.files[0])
-                ext = os.path.splitext(filebasename)[1]
-                basename = filebasename.replace(ext, '')
-            long_path = os.path.join(save_dir, basename+longest_ext)
+            save_dir = _pattern_save_dir(movie, copyd)
+            basename = _pattern_basename(movie, copyd)
+            if save_dir is None:
+                # 本模式无法生成目录（例如按番号获取但未给目标文件夹）：
+                # 直接跳到兜底分支，避免继续按标题截短循环
+                break
+            long_path = os.path.join(save_dir, basename + longest_ext)
             remaining = get_remaining_path_len(os.path.abspath(long_path))
             if remaining > 0:
                 movie.save_dir = save_dir
@@ -409,27 +500,60 @@ def generate_names(movie: Movie):
                 movie.fanart_file = os.path.join(save_dir, Cfg().summarizer.fanart.basename_pattern.format(**copyd) + '.jpg')
                 movie.poster_file = os.path.join(save_dir, Cfg().summarizer.cover.basename_pattern.format(**copyd) + '.jpg')
                 return legalize_info()
+        if save_dir is None:
+            break
+    # 走到这里有两种情况：路径过长需要硬性截短；或本模式不生成目录（save_dir 为 None）
+    if save_dir is None:
+        save_dir = os.path.dirname(movie.files[0]) if movie.files else os.getcwd()
+        basename = movie_id_of(movie)
     else:
-        # 以防万一，当整理路径非常深或者标题起始很长一段没有标点符号时，硬性截短生成的名称
-        copyd['title'] = copyd['title'][:remaining]
-        copyd['rawtitle'] = copyd['rawtitle'][:remaining]
-        # 如果不整理文件，则保存抓取的数据到当前目录
-        if not Cfg().summarizer.move_files:
-            save_dir = os.path.dirname(movie.files[0])
-            filebasename = os.path.basename(movie.files[0])
-            ext = os.path.splitext(filebasename)[1]
-            basename = filebasename.replace(ext, '')
-        else:
-            save_dir = os.path.normpath(Cfg().summarizer.path.output_folder_pattern.format(**copyd)).strip()
-            basename = os.path.normpath(Cfg().summarizer.path.basename_pattern.format(**copyd)).strip()
-        movie.save_dir = save_dir
-        movie.basename = basename
+        # 硬性截短：remaining 此时必然已被赋值
+        shorten = max(1, remaining or 1)
+        copyd['title'] = copyd['title'][:shorten]
+        copyd['rawtitle'] = copyd['rawtitle'][:shorten]
+        basename = _pattern_basename(movie, copyd)
+    movie.save_dir = save_dir
+    movie.basename = basename
 
-        movie.nfo_file = os.path.join(save_dir, Cfg().summarizer.nfo.basename_pattern.format(**copyd) + '.nfo')
-        movie.fanart_file = os.path.join(save_dir, Cfg().summarizer.fanart.basename_pattern.format(**copyd) + '.jpg')
-        movie.poster_file = os.path.join(save_dir, Cfg().summarizer.cover.basename_pattern.format(**copyd) + '.jpg')
+    movie.nfo_file = os.path.join(save_dir, Cfg().summarizer.nfo.basename_pattern.format(**copyd) + '.nfo')
+    movie.fanart_file = os.path.join(save_dir, Cfg().summarizer.fanart.basename_pattern.format(**copyd) + '.jpg')
+    movie.poster_file = os.path.join(save_dir, Cfg().summarizer.cover.basename_pattern.format(**copyd) + '.jpg')
 
-        return legalize_info()
+    return legalize_info()
+
+
+# 按番号获取模式：输出到 <nfo_folder>/<番号>/，文件名用番号
+BY_ID_BASENAME_PATTERN = '{num}'
+
+
+def _pattern_save_dir(movie, copyd):
+    """按当前模式求出保存目录；返回 None 表示本模式不生成目录
+
+    * 按目录整理：沿用配置里的 output_folder_pattern / basename_pattern
+    * 按番号获取：目标文件夹 / 番号
+    """
+    if getattr(movie, 'by_id_mode', False):
+        folder = getattr(movie, 'by_id_folder', '')
+        if not folder:
+            return None
+        return os.path.join(folder, replace_illegal_chars(movie_id_of(movie)))
+    if Cfg().summarizer.move_files:
+        return os.path.normpath(
+            Cfg().summarizer.path.output_folder_pattern.format(**copyd)).strip()
+    return os.path.dirname(movie.files[0]) if movie.files else os.getcwd()
+
+
+def _pattern_basename(movie, copyd):
+    """按当前模式求出文件主名"""
+    if getattr(movie, 'by_id_mode', False):
+        return os.path.normpath(BY_ID_BASENAME_PATTERN.format(**copyd)).strip()
+    if Cfg().summarizer.move_files:
+        return os.path.normpath(
+            Cfg().summarizer.path.basename_pattern.format(**copyd)).strip()
+    if not movie.files:
+        return movie_id_of(movie)
+    filebasename = os.path.basename(movie.files[0])
+    return filebasename.replace(os.path.splitext(filebasename)[1], '')
 
 def reviewMovieID(all_movies, root):
     """人工检查每一部影片的番号"""
@@ -489,55 +613,118 @@ def process_poster(movie: Movie):
             fanart_cropped = add_label_to_poster(fanart_cropped, UNCENSORED_MARK_FILE, LabelPostion.BOTTOM_LEFT)
     fanart_cropped.save(movie.poster_file)
 
-def RunNormalMode(all_movies):
-    """普通整理模式"""
-    def check_step(result, msg='步骤错误'):
-        """检查一个整理步骤的结果，并负责更新tqdm的进度"""
+class _NoopBar:
+    """tqdm 的替身。GUI/worker 模式下不需要终端进度条，但代码路径要保持一致。"""
+
+    def update(self, n=1):
+        pass
+
+    def set_description(self, *args, **kwargs):
+        pass
+
+    def close(self):
+        pass
+
+
+# 整理一部影片的步骤名。顺序即执行顺序，用于事件里的 step_index/step_total，
+# 使前端可以在不解析描述文案的情况下正确渲染进度。
+_NORMAL_MODE_STEPS = [    'crawl',       # 并发抓取各站点
+    'summarize',   # 汇总多站点数据
+    'translate',   # 翻译（仅当配置了翻译引擎）
+    'generate_names',  # 按模板生成文件名
+    'download_cover',  # 下载封面
+    'process_poster',  # 裁剪/加标记生成海报
+    'extrafanart',     # 下载剧照（仅当启用）
+    'write_nfo',   # 写入 NFO
+    'move_files',  # 移动影片文件（仅当启用）
+]
+
+
+def _planned_steps(movies=None):
+    """本次运行实际会执行的步骤名列表（受配置与运行模式影响）"""
+    steps = ['crawl', 'summarize']
+    if Cfg().translator.engine:
+        steps.append('translate')
+    steps += ['generate_names', 'download_cover', 'process_poster']
+    if Cfg().summarizer.extra_fanarts.enabled:
+        steps.append('extrafanart')
+    steps.append('write_nfo')
+    # 按番号获取模式只产出元数据，没有源文件可移动，因此不包含 move_files。
+    # 只要有一部影片处于该模式就按该模式计算（两种模式不会混在一次运行里）。
+    by_id = any(getattr(m, 'by_id_mode', False) for m in (movies or []))
+    if Cfg().summarizer.move_files and not by_id:
+        steps.append('move_files')
+    return steps
+
+
+def RunNormalMode(all_movies, sink=None):
+    """普通整理模式
+
+    Args:
+        all_movies: 待整理的影片列表
+        sink: 事件接收方。为 None 时走既有的 tqdm 终端路径，行为不变。
+    """
+    event_mode = sink is not None
+    sink = sink if sink is not None else NullSink()
+    steps = _planned_steps(all_movies)
+    total_step = len(steps)
+
+    def check_step(result, step, msg='步骤错误'):
+        """检查一个整理步骤的结果，并负责更新进度与上报事件"""
         if result:
-            inner_bar.update()
+            if not event_mode:
+                inner_bar.update()
+            sink(EventKind.MOVIE_STEP, step=step,
+                 step_index=steps.index(step) + 1, step_total=total_step, status='ok')
         else:
             raise Exception(msg + '\n')
 
-    outer_bar = tqdm(all_movies, desc='整理影片', ascii=True, leave=False)
-    total_step = 6
-    if Cfg().translator.engine:
-        total_step += 1
-    if Cfg().summarizer.extra_fanarts.enabled:
-        total_step += 1
+    outer_bar = tqdm(all_movies, desc='整理影片', ascii=True, leave=False) if not event_mode else all_movies
+    total_movies = len(all_movies)
 
     return_movies = []
-    for movie in outer_bar:
+    for index, movie in enumerate(outer_bar, start=1):
+        movie_key = movie_id_of(movie)
+        sink(EventKind.MOVIE_STARTED, movie_id=movie_key, index=index, total=total_movies,
+             data_src=movie.data_src,
+             files=[os.path.split(i)[1] for i in movie.files])
+        # 当前步骤：异常发生时用它把失败归因到具体步骤
+        current_step = 'crawl'
+        inner_bar = tqdm(total=total_step, desc='步骤', ascii=True, leave=False) if not event_mode else _NoopBar()
         try:
             # 初始化本次循环要整理影片任务
             filenames = [os.path.split(i)[1] for i in movie.files]
             logger.info('正在整理: ' + ', '.join(filenames))
-            inner_bar = tqdm(total=total_step, desc='步骤', ascii=True, leave=False)
             # 依次执行各个步骤
             inner_bar.set_description(f'启动并发任务')
-            all_info = parallel_crawler(movie, inner_bar)
+            all_info = parallel_crawler(movie, inner_bar, sink)
             msg = f'为其配置的{len(Cfg().crawler.selection[movie.data_src])}个抓取器均未获取到影片信息'
-            check_step(all_info, msg)
+            check_step(all_info, 'crawl', msg)
 
+            current_step = 'summarize'
             inner_bar.set_description('汇总数据')
             has_required_keys = info_summary(movie, all_info)
-            check_step(has_required_keys)
+            check_step(has_required_keys, 'summarize')
 
             if Cfg().translator.engine:
+                current_step = 'translate'
                 inner_bar.set_description('翻译影片信息')
                 success = translate_movie_info(movie.info)
-                check_step(success)
+                check_step(success, 'translate')
 
+            current_step = 'generate_names'
             generate_names(movie)
-            check_step(movie.save_dir, '无法按命名规则生成目标文件夹')
+            check_step(movie.save_dir, 'generate_names', '无法按命名规则生成目标文件夹')
             if not os.path.exists(movie.save_dir):
                 os.makedirs(movie.save_dir)
 
+            current_step = 'download_cover'
             inner_bar.set_description('下载封面图片')
             if Cfg().summarizer.cover.highres:
                 cover_dl = download_cover(movie.info.covers, movie.fanart_file, movie.info.big_covers)
             else:
                 cover_dl = download_cover(movie.info.covers, movie.fanart_file)
-            check_step(cover_dl, '下载封面图片失败')
+            check_step(cover_dl, 'download_cover', '下载封面图片失败')
             cover, pic_path = cover_dl
             # 确保实际下载的封面的url与即将写入到movie.info中的一致
             if cover != movie.info.cover:
@@ -548,16 +735,20 @@ def RunNormalMode(all_movies):
                 actual_ext = os.path.splitext(pic_path)[1]
                 movie.poster_file = os.path.splitext(movie.poster_file)[0] + actual_ext
 
+            current_step = 'process_poster'
             process_poster(movie)
 
-            check_step(True)
+            check_step(True, 'process_poster')
 
             if Cfg().summarizer.extra_fanarts.enabled:
+                current_step = 'extrafanart'
                 scrape_interval = Cfg().summarizer.extra_fanarts.scrap_interval.total_seconds()
                 inner_bar.set_description('下载剧照')
                 if movie.info.preview_pics:
                     extrafanartdir = os.path.join(movie.save_dir, 'extrafanart')
-                    os.mkdir(extrafanartdir)
+                    # 用 exist_ok 而非裸 mkdir：不移动文件时同一目录会被多部影片共用，
+                    # 裸 mkdir 会让第二部影片抛 FileExistsError 并中断整个运行
+                    os.makedirs(extrafanartdir, exist_ok=True)
                     for (id, pic_url) in enumerate(movie.info.preview_pics):
                         inner_bar.set_description(f"Downloading extrafanart {id} from url: {pic_url}")
                                                                                                                                 
@@ -571,19 +762,21 @@ def RunNormalMode(all_movies):
                                 speed = get_fmt_size(info['rate']) + '/s'
                                 logger.info(f"已下载剧照{pic_url} {id}.png: {width}x{height}, {filesize} [{elapsed}, {speed}]")
                             else:
-                                check_step(False, f"下载剧照{id}: {pic_url}失败")
-                        except:
-                            check_step(False, f"下载剧照{id}: {pic_url}失败")
+                                check_step(False, 'extrafanart', f"下载剧照{id}: {pic_url}失败")
+                        except Exception:
+                            check_step(False, 'extrafanart', f"下载剧照{id}: {pic_url}失败")
                         time.sleep(scrape_interval)
-                check_step(True)
+                check_step(True, 'extrafanart')
 
+            current_step = 'write_nfo'
             inner_bar.set_description('写入NFO')
             write_nfo(movie.info, movie.nfo_file)
-            check_step(True)
-            if Cfg().summarizer.move_files:
+            check_step(True, 'write_nfo')
+            if Cfg().summarizer.move_files and not getattr(movie, 'by_id_mode', False):
+                current_step = 'move_files'
                 inner_bar.set_description('移动影片文件')
                 movie.rename_files(Cfg().summarizer.path.hard_link)
-                check_step(True)
+                check_step(True, 'move_files')
                 logger.info(f'整理完成，相关文件已保存到: {movie.save_dir}\n')
             else:
                 logger.info(f'刮削完成，相关文件已保存到: {movie.nfo_file}\n')
@@ -591,9 +784,15 @@ def RunNormalMode(all_movies):
             if movie != all_movies[-1] and Cfg().crawler.sleep_after_scraping > Duration(0):
                 time.sleep(Cfg().crawler.sleep_after_scraping.total_seconds())
             return_movies.append(movie)
-        # except Exception as e:
-        #     logger.debug(e, exc_info=True)
-        #     logger.error(f'整理失败: {e}')
+            sink(EventKind.MOVIE_FINISHED, movie_id=movie_key, index=index, total=total_movies,
+                 save_dir=movie.save_dir, nfo_file=movie.nfo_file,
+                 title=getattr(movie.info, 'nfo_title', None))
+        except Exception as e:
+            # 既有的 except 被注释掉了，导致失败原因只出现在 stderr；这里上报事件
+            # 以便前端能显示"哪部影片、哪一步、为什么失败"
+            logger.debug(e, exc_info=True)
+            sink(EventKind.MOVIE_FAILED, movie_id=movie_key, index=index, total=total_movies,
+                 step=current_step, error=type(e).__name__, message=str(e))
         finally:
             inner_bar.close()
     return return_movies
@@ -741,6 +940,12 @@ def entry():
     if sys.platform == 'darwin' and not stderr_is_tty():
         show_macos_alert(f'整理完成，共处理 {len(finished_movies)} 部影片。')
     sys.exit(0)
+
+
+# 角色派发的实际执行点：放在模块末尾，确保 RunNormalMode 等符号都已定义，
+# 延迟导入 worker 才不会触发循环导入。
+if _ROLE_DISPATCH is not None:
+    _ROLE_DISPATCH()
 
 
 if __name__ == "__main__":
