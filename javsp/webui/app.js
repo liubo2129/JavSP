@@ -86,7 +86,143 @@
     idsInput: $('ids-input'), idHint: $('id-hint'),
     lightbox: $('lightbox'), lbImg: $('lb-img'), lbClose: $('lb-close'),
     lbPrev: $('lb-prev'), lbNext: $('lb-next'), lbCounter: $('lb-counter'),
+    brand: $('brand'), settings: $('settings'), settingsBody: $('settings-body'),
+    settingsClose: $('settings-close'), settingsCancel: $('settings-cancel'),
+    settingsSave: $('settings-save'), settingsReset: $('settings-reset'),
+    settingsHint: $('settings-hint'),
   };
+
+  /* ---------------------------- 设置面板 ---------------------------- */
+  // 站点清单由服务端给出（含出厂默认），前端不硬编码——
+  // config.yml 历史上就漏配过 5 个抓取器，清单必须只有一处来源。
+  const settings = { open: false, data: null, selection: null, dirty: false };
+
+  async function openSettings() {
+    settings.open = true;
+    settings.dirty = false;
+    el.settings.classList.remove('hidden');
+    el.settingsHint.textContent = '';
+    el.settingsHint.classList.remove('err');
+    el.settingsBody.innerHTML =
+      '<div class="settings-loading"><div class="spinner"></div><span>正在读取设置…</span></div>';
+    try {
+      const res = await fetch('/api/settings', { headers: { 'X-Auth': TOKEN } });
+      const data = await res.json();
+      if (!data.ok) throw new Error(data.message || data.error || '读取失败');
+      settings.data = data;
+      // 把服务端返回的勾选状态收成 {组: Set(站点)}
+      settings.selection = {};
+      for (const g of data.groups) {
+        settings.selection[g.key] = new Set(
+          g.crawlers.filter((c) => c.enabled).map((c) => c.id));
+      }
+      renderSettings();
+    } catch (e) {
+      el.settingsBody.innerHTML =
+        `<div class="pc-note"><span>无法读取设置：${esc(e.message || e)}</span></div>`;
+    }
+  }
+
+  function closeSettings() {
+    settings.open = false;
+    el.settings.classList.add('hidden');
+  }
+
+  function renderSettings() {
+    const data = settings.data;
+    if (!data) return;
+    const parts = [];
+    for (const g of data.groups) {
+      const enabled = settings.selection[g.key] || new Set();
+      const selectable = g.crawlers.filter((c) => c.available);
+      const allOn = selectable.length > 0 && selectable.every((c) => enabled.has(c.id));
+      const items = g.crawlers.map((c) => {
+        const on = enabled.has(c.id) ? 'checked' : '';
+        const dis = c.available ? '' : 'disabled';
+        const note = c.note ? `<span class="crawler-note">${esc(c.note)}</span>` : '';
+        return `<label class="crawler-item ${dis}" data-group="${esc(g.key)}" data-id="${esc(c.id)}">
+          <input type="checkbox" ${on} ${c.available ? '' : 'disabled'}>
+          <span class="switch"></span>
+          <span class="crawler-text">
+            <span class="crawler-name">${esc(c.id)}</span>${note}
+          </span>
+        </label>`;
+      }).join('');
+      parts.push(`<section class="crawler-group" data-group="${esc(g.key)}">
+        <div class="crawler-group-head">
+          <h3>${esc(g.label)}<span class="group-note">${g.crawlers.length} 个站点</span></h3>
+          <button class="group-toggle" type="button" data-toggle-group="${esc(g.key)}">
+            ${allOn ? '全不选' : '全选'}
+          </button>
+        </div>
+        <div class="crawler-list">${items}</div>
+      </section>`);
+    }
+    el.settingsBody.innerHTML = parts.join('');
+  }
+
+  /** 收集当前勾选状态，返回 {组: [站点]} */
+  function collectSelection() {
+    const out = {};
+    for (const [group, set] of Object.entries(settings.selection)) {
+      out[group] = [...set];
+    }
+    return out;
+  }
+
+  function setGroupEnabled(group, value) {
+    const g = (settings.data.groups || []).find((x) => x.key === group);
+    if (!g) return;
+    const set = new Set();
+    if (value) {
+      g.crawlers.filter((c) => c.available).forEach((c) => set.add(c.id));
+    }
+    settings.selection[group] = set;
+    settings.dirty = true;
+    renderSettings();
+  }
+
+  async function saveSettings() {
+    const selection = collectSelection();
+    // 前端先拦一道：空组会让该类型的影片必然失败
+    const empty = (settings.data.groups || [])
+      .filter((g) => (selection[g.key] || []).length === 0)
+      .map((g) => g.key);
+    if (empty.length) {
+      el.settingsHint.textContent = `这些分组至少要选一个站点：${empty.join('、')}`;
+      el.settingsHint.classList.add('err');
+      return;
+    }
+    el.settingsSave.disabled = true;
+    el.settingsHint.classList.remove('err');
+    el.settingsHint.textContent = '正在保存…';
+    try {
+      const res = await api('/api/settings/crawler_selection', { selection });
+      if (!res.ok) throw new Error(res.message || res.error || '保存失败');
+      settings.dirty = false;
+      el.settingsHint.textContent = res.message || '已保存';
+      pushLog('设置已保存：抓取站点已更新（下次任务生效）', 'ok');
+      toast('设置已保存，将在下一次任务生效', 'ok');
+      closeSettings();
+    } catch (e) {
+      el.settingsHint.textContent = String(e.message || e);
+      el.settingsHint.classList.add('err');
+    } finally {
+      el.settingsSave.disabled = false;
+    }
+  }
+
+  function resetSettingsToDefault() {
+    const defaults = settings.data.defaults || {};
+    settings.selection = {};
+    for (const g of settings.data.groups) {
+      settings.selection[g.key] = new Set(defaults[g.key] || []);
+    }
+    settings.dirty = true;
+    renderSettings();
+    el.settingsHint.classList.remove('err');
+    el.settingsHint.textContent = '已恢复为出厂默认，点「保存」生效';
+  }
 
   /* --------------------------- 模式切换 --------------------------- */
   function setMode(mode) {
@@ -804,6 +940,53 @@
     // 成功时结果通过 gui.directory_selected 事件返回（按当前模式写入对应输入框）
   });
 
+  /* --------------------------- 设置面板交互 --------------------------- */
+  function toggleSettings() {
+    if (settings.open) closeSettings();
+    else openSettings();
+  }
+
+  el.brand.addEventListener('click', toggleSettings);
+  el.brand.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggleSettings(); }
+  });
+  el.settingsClose.addEventListener('click', closeSettings);
+  el.settingsCancel.addEventListener('click', closeSettings);
+  el.settingsSave.addEventListener('click', saveSettings);
+  el.settingsReset.addEventListener('click', resetSettingsToDefault);
+
+  // 点遮罩空白处关闭（点对话框内部不关）
+  el.settings.addEventListener('click', (e) => {
+    if (e.target === el.settings) closeSettings();
+  });
+
+  // 勾选与"全选/全不选"（用事件委托，避免每次渲染都重新绑定）
+  el.settingsBody.addEventListener('change', (e) => {
+    const input = e.target.closest('input[type="checkbox"]');
+    if (!input) return;
+    const item = input.closest('.crawler-item');
+    if (!item) return;
+    const { group, id } = item.dataset;
+    const set = settings.selection[group] || new Set();
+    if (input.checked) set.add(id); else set.delete(id);
+    settings.selection[group] = set;
+    settings.dirty = true;
+    el.settingsHint.classList.remove('err');
+    el.settingsHint.textContent = '有未保存的改动';
+  });
+
+  el.settingsBody.addEventListener('click', (e) => {
+    const btn = e.target.closest('[data-toggle-group]');
+    if (!btn) return;
+    const group = btn.dataset.toggleGroup;
+    const g = settings.data.groups.find((x) => x.key === group);
+    const enabled = settings.selection[group] || new Set();
+    const selectable = g.crawlers.filter((c) => c.available);
+    const allOn = selectable.length > 0 && selectable.every((c) => enabled.has(c.id));
+    setGroupEnabled(group, !allOn);
+    el.settingsHint.textContent = '有未保存的改动';
+  });
+
   /* ------------------------- 气泡的交互绑定 ------------------------- */  el.previewBody.addEventListener('click', (e) => {
     // "在访达中显示" 按钮
     const revealBtn = e.target.closest('[data-reveal]');
@@ -848,11 +1031,16 @@
   });
 
   document.addEventListener('keydown', (e) => {
-    // 放大查看优先响应（Esc 先关放大，再关气泡）
+    // 逐层优先：放大查看 > 设置面板 > 详情气泡，
+    // 否则 Esc 会一次关掉多个浮层
     if (!el.lightbox.classList.contains('hidden')) {
       if (e.key === 'Escape') { closeLightbox(); return; }
       if (e.key === 'ArrowLeft') { stepLightbox(-1); return; }
       if (e.key === 'ArrowRight') { stepLightbox(1); return; }
+      return;
+    }
+    if (settings.open) {
+      if (e.key === 'Escape') closeSettings();
       return;
     }
     if (e.key === 'Escape') closePopover();

@@ -11,7 +11,8 @@
 
     <!-- ========== 侧边栏 ========== -->
     <aside class="sidebar">
-      <header class="brand">
+      <header class="brand" id="brand" role="button" tabindex="0"
+              title="点击打开设置" aria-label="打开设置">
         <div class="brand-mark" aria-hidden="true">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
                stroke-linecap="round" stroke-linejoin="round">
@@ -24,6 +25,13 @@
           <h1>JavSP</h1>
           <p>元数据刮削器</p>
         </div>
+        <span class="brand-gear" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+               stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="12" cy="12" r="3"/>
+            <path d="M19.4 15a1.7 1.7 0 00.3 1.9l.1.1a2 2 0 11-2.8 2.8l-.1-.1a1.7 1.7 0 00-2.9 1.2v.2a2 2 0 11-4 0v-.1A1.7 1.7 0 006.9 20l-.1.1a2 2 0 11-2.8-2.8l.1-.1a1.7 1.7 0 00-1.2-2.9H2.8a2 2 0 110-4h.1A1.7 1.7 0 004 6.9l-.1-.1a2 2 0 112.8-2.8l.1.1A1.7 1.7 0 009.7 3V2.8a2 2 0 114 0V3a1.7 1.7 0 002.9 1.2l.1-.1a2 2 0 112.8 2.8l-.1.1A1.7 1.7 0 0021 9.9h.2a2 2 0 110 4H21a1.7 1.7 0 00-1.6 1.1z"/>
+          </svg>
+        </span>
         <span class="conn" id="conn" title="未连接"></span>
       </header>
 
@@ -226,6 +234,34 @@
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 5l7 7-7 7"/></svg>
     </button>
     <div class="lb-counter" id="lb-counter"></div>
+  </div>
+
+  <!-- 设置面板（点击左上角 logo 打开） -->
+  <div class="settings hidden" id="settings">
+    <div class="settings-dialog" role="dialog" aria-modal="true" aria-labelledby="settings-title">
+      <header class="settings-head">
+        <div>
+          <h2 id="settings-title">设置</h2>
+          <p>选择要从哪些站点抓取影片信息。改动对<strong>下一次任务</strong>生效。</p>
+        </div>
+        <button class="settings-close" id="settings-close" type="button" title="关闭 (Esc)">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg>
+        </button>
+      </header>
+
+      <div class="settings-body" id="settings-body">
+        <div class="settings-loading"><div class="spinner"></div><span>正在读取设置…</span></div>
+      </div>
+
+      <footer class="settings-foot">
+        <span class="settings-hint" id="settings-hint"></span>
+        <div class="settings-actions">
+          <button class="btn ghost" id="settings-reset" type="button">恢复默认</button>
+          <button class="btn ghost" id="settings-cancel" type="button">取消</button>
+          <button class="btn primary" id="settings-save" type="button">保存</button>
+        </div>
+      </footer>
+    </div>
   </div>
 
   <script src="app.js"></script>
