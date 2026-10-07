@@ -1028,7 +1028,55 @@
       </div>
     </div>`);
 
-    /* ---------- 图库：封面 / 剧照 ---------- */
+    /* ---------- 元数据 ---------- */
+    const rows = [
+      ['系列', info.series],
+      ['制作商', info.studio],
+      ['发行商', info.publisher],
+      ['导演', info.director],
+      ['原始标题', info.original_title],
+      ['文件大小', res.size ? fmtSize(res.size) : null],
+      ['所在目录', res.dir],
+    ].filter(([, v]) => v);
+    if (rows.length) {
+      out.push(`<dl class="pc-rows">${rows.map(([k, v]) =>
+        `<dt>${esc(k)}</dt><dd>${esc(v)}</dd>`).join('')}</dl>`);
+    }
+
+    /* ---------- 演员 ---------- */
+    const actresses = info.actresses || [];
+    if (actresses.length) {
+      out.push(`<div class="pc-section"><h5>演员</h5>
+        <div class="pc-actresses">${actresses.map((a) => {
+        const img = a.thumb
+          ? `<img src="${esc(proxyImg(a.thumb))}" alt="" loading="lazy"
+                 onerror="this.replaceWith(Object.assign(document.createElement('div'),{className:'ph',textContent:${JSON.stringify((a.name || '?')[0])}}))">`
+          : `<div class="ph">${esc((a.name || '?')[0])}</div>`;
+        return `<div class="pc-actress">${img}<span>${esc(a.name)}</span></div>`;
+      }).join('')}</div></div>`);
+    }
+
+    /* ---------- 剧情简介 ---------- */
+    if (info.plot) {
+      out.push(`<div class="pc-section"><h5>剧情简介</h5>
+        <p class="pc-plot">${esc(info.plot)}</p></div>`);
+    }
+
+    /* ---------- 分类 ---------- */
+    const genres = dedupe(info.genres || []);
+    if (genres.length) {
+      out.push(`<div class="pc-section"><h5>分类</h5>
+        <div class="pc-genres">${genres.map((g) =>
+        `<span class="pc-genre">${esc(g)}</span>`).join('')}</div></div>`);
+    }
+
+    /* ---------- 预告片 ---------- */
+    if (info.trailer) {
+      out.push(`<div class="pc-section"><h5>预告片</h5>
+        <div class="pc-sub">${esc(info.trailer)}</div></div>`);
+    }
+
+    /* ---------- 图库：封面 / 剧照（放在信息之后，作为收尾的视觉内容） ---------- */
     const stills = gallery.stills || [];
     const others = gallery.other || [];
     if (gallery.fanart || stills.length || others.length) {
@@ -1052,54 +1100,6 @@
         <h5>图片 <span class="pc-count">${cards.length} 张</span></h5>
         <div class="pc-gallery">${cards.join('')}</div>
       </div>`);
-    }
-
-    /* ---------- 元数据 ---------- */
-    const rows = [
-      ['系列', info.series],
-      ['制作商', info.studio],
-      ['发行商', info.publisher],
-      ['导演', info.director],
-      ['原始标题', info.original_title],
-      ['文件大小', res.size ? fmtSize(res.size) : null],
-      ['所在目录', res.dir],
-    ].filter(([, v]) => v);
-    if (rows.length) {
-      out.push(`<dl class="pc-rows">${rows.map(([k, v]) =>
-        `<dt>${esc(k)}</dt><dd>${esc(v)}</dd>`).join('')}</dl>`);
-    }
-
-    /* ---------- 分类 ---------- */
-    const genres = dedupe(info.genres || []);
-    if (genres.length) {
-      out.push(`<div class="pc-section"><h5>分类</h5>
-        <div class="pc-genres">${genres.map((g) =>
-        `<span class="pc-genre">${esc(g)}</span>`).join('')}</div></div>`);
-    }
-
-    /* ---------- 演员 ---------- */
-    const actresses = info.actresses || [];
-    if (actresses.length) {
-      out.push(`<div class="pc-section"><h5>演员</h5>
-        <div class="pc-actresses">${actresses.map((a) => {
-        const img = a.thumb
-          ? `<img src="${esc(proxyImg(a.thumb))}" alt="" loading="lazy"
-                 onerror="this.replaceWith(Object.assign(document.createElement('div'),{className:'ph',textContent:${JSON.stringify((a.name || '?')[0])}}))">`
-          : `<div class="ph">${esc((a.name || '?')[0])}</div>`;
-        return `<div class="pc-actress">${img}<span>${esc(a.name)}</span></div>`;
-      }).join('')}</div></div>`);
-    }
-
-    /* ---------- 剧情简介 ---------- */
-    if (info.plot) {
-      out.push(`<div class="pc-section"><h5>剧情简介</h5>
-        <p class="pc-plot">${esc(info.plot)}</p></div>`);
-    }
-
-    /* ---------- 预告片 ---------- */
-    if (info.trailer) {
-      out.push(`<div class="pc-section"><h5>预告片</h5>
-        <div class="pc-sub">${esc(info.trailer)}</div></div>`);
     }
 
     out.push(revealButton(path, res.nfo));
