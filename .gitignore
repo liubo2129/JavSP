@@ -142,3 +142,7 @@ ver_hook.py
 .idea
 .vscode
 .DS_Store
+
+# JavSP 的默认输出目录（config.yml 的 output_folder_pattern）。
+# 在仓库根目录直接跑 worker/CLI 会生成它，属于运行产物，不入库。
+\#整理完成/

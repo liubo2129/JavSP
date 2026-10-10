@@ -784,8 +784,16 @@ def RunNormalMode(all_movies, sink=None):
             if movie != all_movies[-1] and Cfg().crawler.sleep_after_scraping > Duration(0):
                 time.sleep(Cfg().crawler.sleep_after_scraping.total_seconds())
             return_movies.append(movie)
+            # 上报**移动后**的路径：启用 move_files 时文件已被搬到
+            # "#整理完成/..."，仍报旧路径会让界面点击影片时找不到文件。
+            # rename_files() 把新路径记在 new_paths，save_dir/nfo_file 都是
+            # 相对路径，这里统一转成绝对路径再上报。
+            final_paths = [os.path.abspath(p)
+                           for p in (getattr(movie, 'new_paths', None) or movie.files)]
             sink(EventKind.MOVIE_FINISHED, movie_id=movie_key, index=index, total=total_movies,
-                 save_dir=movie.save_dir, nfo_file=movie.nfo_file,
+                 save_dir=os.path.abspath(movie.save_dir) if movie.save_dir else None,
+                 nfo_file=os.path.abspath(movie.nfo_file) if movie.nfo_file else None,
+                 paths=final_paths,
                  title=getattr(movie.info, 'nfo_title', None))
         except Exception as e:
             # 既有的 except 被注释掉了，导致失败原因只出现在 stderr；这里上报事件

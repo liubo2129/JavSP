@@ -159,6 +159,36 @@ def _install_event_logging(sink) -> None:
     root.setLevel(logging.INFO)
 
 
+def _current_paths(movie) -> List[str]:
+    """影片文件**当前**所在位置（绝对路径）
+
+    整理时会调用 ``movie.rename_files()`` 把文件移到
+    ``<输出目录>/<女优>/[番号] 标题/``（默认在 ``#整理完成`` 下）。
+    该方法把新路径记在 ``movie.new_paths``，**不会**更新 ``movie.files``，
+    所以移动后 ``movie.files`` 指向的是已经不存在的旧路径——
+    界面拿它去查详情只能得到"文件不存在"。
+    """
+    paths = getattr(movie, 'new_paths', None) or movie.files
+    return [_abs(p) for p in paths]
+
+
+def _nfo_for_movie(movie) -> str | None:
+    """影片整理后的 nfo 路径（绝对路径）
+
+    移动后 nfo 与影片文件同目录，所以优先按新路径找，找不到再退回旧路径。
+    """
+    for candidate in _current_paths(movie) + [_abs(f) for f in movie.files]:
+        found = _find_nfo_for([candidate])
+        if found:
+            return found
+    nfo = getattr(movie, 'nfo_file', None)
+    if nfo:
+        absolute = _abs(nfo)
+        if os.path.isfile(absolute):
+            return absolute
+    return None
+
+
 def _movie_summary(movie) -> Dict[str, Any]:
     """把 Movie 转成前端可直接渲染的结构
 
@@ -166,13 +196,14 @@ def _movie_summary(movie) -> Dict[str, Any]:
     只给 ``str(movie)`` 那种 ``Movie('ABP-647')`` 字符串是不够的。
     """
     from javsp.__main__ import movie_id_of
+    paths = _current_paths(movie)
     return {
         'id': movie_id_of(movie),
         'data_src': movie.data_src,
-        'files': [os.path.basename(f) for f in movie.files],
-        'paths': [_abs(f) for f in movie.files],
-        'file_count': len(movie.files),
-        'scraped': _find_nfo_for(movie.files) is not None,
+        'files': [os.path.basename(p) for p in paths],
+        'paths': paths,
+        'file_count': len(paths),
+        'scraped': _find_nfo_for(paths) is not None,
     }
 
 

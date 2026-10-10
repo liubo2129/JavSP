@@ -369,6 +369,50 @@ def _find_nfo_for_path(video_path: str) -> Optional[str]:
     return None
 
 
+def _locate_after_move(path: str, root: Optional[str]) -> Optional[Path]:
+    """影片文件被"整理"移动后，尝试在输出目录里把它找回来
+
+    启用 ``summarizer.move_files`` 时，文件会被移到
+    ``output_folder_pattern`` 指定的目录（默认 ``#整理完成/<女优>/[番号] 标题/``），
+    文件名也会按 ``basename_pattern`` 重写，因此**不能**按原文件名去找。
+
+    这里按"同名字幕/番号"的线索做尽力而为的搜索：
+    优先看 ``#整理完成`` 下是否存在与原文件同名、或按番号命名的文件。
+    """
+    if not root:
+        return None
+    source = Path(path)
+    root_path = Path(root)
+    if not root_path.is_dir():
+        return None
+
+    # 输出目录名取自配置；取不到时退回默认的 "#整理完成"
+    try:
+        pattern = Cfg().summarizer.path.output_folder_pattern
+        prefix = str(pattern).split('{', 1)[0].strip('/').strip(os.sep) or '#整理完成'
+    except Exception:  # noqa: BLE001 - 配置缺失不影响兜底搜索
+        prefix = '#整理完成'
+
+    candidates = [root_path / prefix]
+    # 目录层级可能有多段（如 "a/b"），也可能根本不存在
+    for candidate in candidates:
+        if not candidate.is_dir():
+            continue
+        target_name = source.name
+        stem = source.stem
+        try:
+            for found in candidate.rglob(target_name):
+                if found.is_file():
+                    return found
+            # 文件名已被重写：按原文件名的番号部分模糊匹配
+            for found in candidate.rglob(f'*{stem}*'):
+                if found.is_file():
+                    return found
+        except OSError:
+            logger.debug('搜索移动后的文件失败: %s', candidate, exc_info=True)
+    return None
+
+
 def _first_existing(folder: Path, names) -> Optional[str]:
     """返回目录中第一个存在的文件名（绝对路径）"""
     for name in names:
@@ -655,6 +699,14 @@ class GuiServer:
                     'message': '只能查看已扫描目录内的影片'}
         target = Path(path)
         if not target.is_file():
+            # 文件可能已被"整理"移动到 #整理完成/ 下。前端正常情况下会跟着
+            # movie.finished 更新路径，这里兜底处理历史截图/旧状态，
+            # 避免只抛一句"文件不存在"让人以为是 bug。
+            moved = _locate_after_move(path, root or self._directory)
+            if moved:
+                return {'ok': False, 'error': 'moved',
+                        'moved_to': str(moved),
+                        'message': f'文件已整理到: {moved}'}
             return {'ok': False, 'error': 'not_found',
                     'message': f'文件不存在: {path}'}
 

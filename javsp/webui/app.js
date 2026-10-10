@@ -471,7 +471,8 @@
     if (s.movies.length) {
       const rows = s.movies.map((m, i) => {
         const path = (m.paths && m.paths[0]) || '';
-        return `<tr data-idx="${i}" data-path="${esc(path)}" title="点击查看影片信息">
+        return `<tr data-idx="${i}" data-movie-id="${esc(m.id)}" data-path="${esc(path)}"
+            title="点击查看影片信息">
         <td class="num">${esc(m.id)}${m.scraped
           ? '<span class="scraped-dot" title="已整理（有 NFO）"></span>' : ''
         }${m.data_src && m.data_src !== 'normal'
@@ -551,6 +552,34 @@
   }
 
   /* ---------------------------- 事件处理 ---------------------------- */
+
+  /**
+   * 整理会移动影片文件（移到 `#整理完成/<女优>/[番号] 标题/`）。
+   * worker 在 movie.finished 里上报移动后的路径，这里同步更新：
+   *   - 扫描预览表格行的 data-path（否则点击时按旧路径查详情 → 文件不存在）
+   *   - state.scan.movies 缓存（重绘时不会又退回旧路径）
+   */
+  function syncMovedPaths(p) {
+    const paths = p.paths;
+    if (!paths || !paths.length) return;
+    const first = paths[0];
+
+    const cached = (state.scan.movies || []).find((m) => m.id === p.movie_id);
+    if (cached) {
+      cached.paths = paths;
+      cached.files = paths.map((x) => x.split('/').pop());
+      cached.scraped = true;
+    }
+
+    [...el.previewBody.querySelectorAll('tr[data-movie-id]')].forEach((tr) => {
+      if (tr.dataset.movieId !== p.movie_id) return;
+      // 气泡正开着且指向这一行时，也要换到新路径
+      const wasOpen = popover.open && popover.path === tr.dataset.path;
+      tr.dataset.path = first;
+      if (wasOpen) popover.path = first;
+    });
+  }
+
   function handleEvent(evt) {
     const p = evt.payload || {};
     switch (evt.kind) {
@@ -632,6 +661,7 @@
           item.scraped = !!item.path;
           item.title = p.title || '';
         }
+        syncMovedPaths(p);
         state.finished += 1;
         pushLog(`完成 ${p.movie_id}`, 'ok');
         break;
