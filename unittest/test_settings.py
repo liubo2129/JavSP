@@ -142,14 +142,19 @@ def _names(values):
 
 
 @pytest.fixture
-def singleton_cfg():
+def singleton_cfg(tmp_path, monkeypatch):
     """真实 Cfg 单例；merge_into_config 会改写它，用完恢复原状
 
     这些用例刻意用真实配置模型而不是假对象：confz 的模型是 frozen 的，
     用假对象测不出 model_copy 路径。
+
+    同时把设置文件指到一个不存在的路径：否则会读到开发机上真实的
+    ~/Library/Application Support/JavSP/settings.json，测试结果随本机状态变化
+    （踩过这个坑：本机残留的设置文件带着基线快照，让回退分支的用例失败）。
     """
     from javsp.config import Cfg
 
+    monkeypatch.setenv('JAVSP_SETTINGS_FILE', str(tmp_path / 'no-settings.json'))
     cfg = Cfg()
     original_crawler = cfg.crawler
     yield cfg
@@ -225,14 +230,16 @@ def test_merge_into_config_ignores_empty_group(singleton_cfg):
     assert _names(Cfg().crawler.selection.normal) == ['javdb']
 
 
-def test_merge_into_config_appends_factory_new_site(singleton_cfg):
+def test_merge_into_config_appends_factory_new_site(singleton_cfg, tmp_path, monkeypatch):
     """升级场景：出厂基线新增了站点，而配置还是旧的 -> 自动补上，不能丢
 
-    判据是"出厂基线有、当前配置没有"。这种站点此前不存在，
-    用户不可能主动禁用。
+    这里刻意指向一个**不存在**的设置文件：没有基线快照时才走
+    "拿当前配置当近似基线"的回退分支（有快照时按快照算差集，
+    那是另一条路径，见 test_factory_new_site_uses_saved_baseline）。
     """
     from javsp.config import Cfg
 
+    monkeypatch.setenv('JAVSP_SETTINGS_FILE', str(tmp_path / 'absent.json'))
     # 模拟旧配置：normal 里少了出厂基线的 prestige
     old = [n for n in DEFAULT_SELECTION['normal'] if n != 'prestige']
     sel = _fresh_selection({'normal': old})
@@ -242,6 +249,26 @@ def test_merge_into_config_appends_factory_new_site(singleton_cfg):
     names = _names(Cfg().crawler.selection.normal)
     assert names[0] == 'jav321'
     assert 'prestige' in names, '出厂新增的站点被静默丢弃了'
+
+
+def test_factory_new_site_uses_saved_baseline(singleton_cfg, tmp_path, monkeypatch):
+    """有基线快照时按快照算差集：用户保存后新增的出厂站点才会被补上
+
+    这条路径保证"用户主动禁用的站点不会因为升级又冒出来"。
+    """
+    from javsp.config import Cfg
+
+    target = tmp_path / 'settings.json'
+    monkeypatch.setenv('JAVSP_SETTINGS_FILE', str(target))
+    # 保存时出厂基线就与现在一致 -> 没有"出厂新增"
+    save_crawler_selection({'normal': ['jav321']})
+
+    sel = _fresh_selection({'normal': DEFAULT_SELECTION['normal']})
+    object.__setattr__(Cfg(), 'crawler', Cfg().crawler.model_copy(update={'selection': sel}))
+
+    merge_into_config(Cfg().crawler.selection, {'normal': ['jav321']})
+    # 用户只选了 jav321，出厂没有新增站点 -> 结果就只有 jav321
+    assert _names(Cfg().crawler.selection.normal) == ['jav321']
 
 
 # --------------------------- 端到端：设置生效 --------------------------- #

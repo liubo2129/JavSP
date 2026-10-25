@@ -293,3 +293,58 @@ def test_scan_movies__reports_walking_interval(prepare_files, monkeypatch):
     walking = [e.payload for e in sink.events if e.payload['phase'] == 'walking']
     assert len(walking) == 1  # 3 个文件，间隔 2 -> 仅第 2 个文件时上报
     assert walking[0]['file_count'] == 2
+
+
+class TestCurrentPathsAfterMove:
+    """整理移动文件后的路径归属
+
+    启用 summarizer.move_files 时 rename_files() 把新路径记在 movie.new_paths，
+    但**不会**更新 movie.files。界面若继续用 movie.files 去查详情，
+    得到的是一句"文件不存在"（用户实际报过这个问题）。
+    """
+
+    def test_uses_new_paths_when_moved(self):
+        from javsp.worker import _current_paths
+
+        class M:
+            files = ['/tmp/x/old.mp4']
+            new_paths = ['/tmp/x/#整理完成/女优/[ABP-647] t/ABP-647.mp4']
+
+        assert _current_paths(M()) == ['/tmp/x/#整理完成/女优/[ABP-647] t/ABP-647.mp4']
+
+    def test_falls_back_to_files_when_not_moved(self):
+        from javsp.worker import _current_paths
+
+        class M:
+            files = ['/tmp/x/old.mp4']
+            new_paths = None
+
+        assert _current_paths(M()) == ['/tmp/x/old.mp4']
+
+    def test_nfo_found_next_to_moved_file(self, tmp_path):
+        """移动后 nfo 与影片同目录，必须能找到"""
+        from javsp.worker import _nfo_for_movie
+
+        moved_dir = tmp_path / '#整理完成' / '女优' / '[ABP-647] t'
+        moved_dir.mkdir(parents=True)
+        video = moved_dir / 'ABP-647.mp4'
+        video.write_bytes(b'x')
+        nfo = moved_dir / 'movie.nfo'
+        nfo.write_text('<movie/>', encoding='utf-8')
+
+        class M:
+            files = [str(tmp_path / 'ABP-647.mp4')]   # 旧路径，已不存在
+            new_paths = [str(video)]
+            nfo_file = str(nfo)
+
+        assert _nfo_for_movie(M()) == str(nfo)
+
+    def test_nfo_is_none_when_nothing_exists(self, tmp_path):
+        from javsp.worker import _nfo_for_movie
+
+        class M:
+            files = [str(tmp_path / 'gone.mp4')]
+            new_paths = None
+            nfo_file = str(tmp_path / 'gone.nfo')
+
+        assert _nfo_for_movie(M()) is None
