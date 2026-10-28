@@ -2,7 +2,20 @@
 import re
 import sys
 
-from javsp.web.base import is_connectable, get_html, get_resp_text, request_get
+from javsp.web.base import Request, is_connectable, get_html, get_resp_text, request_get
+
+
+# 可用于查询JavBus当前地址的站点：永久域名 + 已知的防屏蔽地址
+JAVBUS_URL_SEEDS = [
+    'https://www.javbus.com',
+    'https://www.buscdn.casa',
+    'https://www.dmmbus.casa',
+    'https://www.cdnbus.casa',
+    'https://www.busdmm.casa',
+    'https://www.busjav.casa',
+    'https://www.javbus.casa',
+    'https://www.seedmm.casa',
+]
 
 
 def get_proxy_free_url(site_name: str, prefer_url=None) -> str:
@@ -44,10 +57,23 @@ def _get_avsox_urls() -> list:
 
 
 def _get_javbus_urls() -> list:
-    html = get_html('https://www.javbus.one/')
-    text = html.text_content()
-    urls = re.findall(r'防屏蔽地址：(https://(?:[\d\w][-\d\w]{1,61}[\d\w]\.){1,2}[a-z]{2,})', text, re.I | re.A)
-    return urls
+    """从JavBus首页的公告栏获取当前的防屏蔽地址
+
+    JavBus的地址会定期更换，旧地址（如javbus.one）可能已经无法访问。每个可用的
+    JavBus站点首页都会公布防屏蔽地址，因此逐个尝试这些站点，取第一个能解析出结果的。
+    """
+    # JavBus会根据Accept-Language判断访客地区，非中文会被重定向到年龄验证页
+    request = Request()
+    request.headers['Accept-Language'] = 'zh-CN,zh;q=0.9,zh-TW;q=0.8'
+    for seed in JAVBUS_URL_SEEDS:
+        try:
+            html = request.get_html(seed)
+        except Exception:
+            continue
+        urls = html.xpath("//strong[contains(text(), '防屏蔽地址')]/following-sibling::a[1]/@href")
+        if urls:
+            return urls
+    return []
 
 
 def _get_javlib_urls() -> list:

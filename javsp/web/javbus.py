@@ -1,12 +1,15 @@
 """从JavBus抓取数据"""
 import logging
 
+import requests
+
 
 from javsp.web.base import *
 from javsp.web.exceptions import *
 from javsp.func import *
 from javsp.config import Cfg, CrawlerID
 from javsp.datatype import MovieInfo, GenreMap
+from javsp.web.proxyfree import get_proxy_free_url
 
 
 logger = logging.getLogger(__name__)
@@ -15,7 +18,42 @@ permanent_url = 'https://www.javbus.com'
 if Cfg().network.proxy_server is not None:
     base_url = permanent_url
 else:
-    base_url = str(Cfg().network.proxy_free[CrawlerID.javbus])
+    base_url = str(Cfg().network.proxy_free[CrawlerID.javbus]).rstrip('/') or permanent_url
+
+# JavBus 会根据 Accept-Language 判断访客所在地区：首选项不是中文时，详情页和首页
+# 都会被 302 到 /doc/driver-verify（年龄验证页，响应体为空），拿不到任何影片数据。
+# 浏览器访问时中文环境会直接放行，所以这里固定优先使用中文。
+request = Request()
+request.headers['Accept-Language'] = 'zh-CN,zh;q=0.9,zh-TW;q=0.8'
+
+
+def _is_age_verify(resp) -> bool:
+    """响应是否是 JavBus 的年龄验证跳转"""
+    return any('driver-verify' in r.headers.get('location', '') for r in resp.history)
+
+
+def _looks_parked(resp) -> bool:
+    """免代理域名过期后可能被域名停放商接管，返回的只是跳转提示页"""
+    return 'parklogic' in resp.text or 'Redirecting...' in resp.text
+
+
+def _request_movie(movie_id: str):
+    """请求影片页面
+
+    配置的免代理域名可能已经失效（被停放、证书错误、连接不上），此时重新获取当前
+    可用的免代理地址，拿不到就退回永久域名。
+    """
+    global base_url
+    try:
+        resp = request.get(f'{base_url}/{movie_id}', delay_raise=True)
+        if not _looks_parked(resp):
+            return resp
+        logger.warning(f'JavBus免代理域名已失效: {base_url}')
+    except requests.exceptions.RequestException as e:
+        logger.warning(f'JavBus免代理域名无法访问: {base_url} ({type(e).__name__})')
+    base_url = get_proxy_free_url('javbus', prefer_url=permanent_url) or permanent_url
+    logger.warning(f'使用新的JavBus地址: {base_url}')
+    return request.get(f'{base_url}/{movie_id}', delay_raise=True)
 
 
 def parse_data(movie: MovieInfo):
@@ -23,10 +61,11 @@ def parse_data(movie: MovieInfo):
     Args:
         movie (MovieInfo): 要解析的影片信息，解析后的信息直接更新到此变量内
     """
-    url = f'{base_url}/{movie.dvdid}'
-    resp = request_get(url, delay_raise=True)
-    # 疑似JavBus检测到类似爬虫的行为时会要求登录，不过发现目前不需要登录也可以从重定向前的网页中提取信息
-    if resp.history and resp.history[0].status_code == 302:
+    resp = _request_movie(movie.dvdid)
+    if _is_age_verify(resp):
+        raise SiteBlocked(f'JavBus要求年龄验证(/doc/driver-verify)，当前网络地区无法直接访问: {resp.url}')
+    # 旧版JavBus会把影片页面放在302的响应体里，新版本响应体为空，此时以最终页面为准
+    if resp.history and resp.history[0].content.strip():
         html = resp2html(resp.history[0])
     else:
         html = resp2html(resp)
