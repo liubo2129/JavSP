@@ -31,8 +31,9 @@ network:
     avsox: 'https://avsox.click'
     # 原免代理域名（seedmm.help / javbus.one）已失效，失效时软件会自动重新获取防屏蔽地址
     javbus: 'https://www.javbus.com'
-    javdb: 'https://javdb368.com'
-    javlib: 'https://www.y78k.com'
+    # 原免代理域名（javdb368.com / jav524.app）已被域名停放，失效时会自动换用新地址
+    javdb: 'https://javdb580.com'
+    javlib: 'https://www.h103n.com'
   # 网络问题导致抓取数据失败时的重试次数，通常3次就差不多了
   retry: 3
   # https://en.wikipedia.org/wiki/ISO_8601#Durations

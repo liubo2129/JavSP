@@ -32,11 +32,6 @@ def _is_age_verify(resp) -> bool:
     return any('driver-verify' in r.headers.get('location', '') for r in resp.history)
 
 
-def _looks_parked(resp) -> bool:
-    """免代理域名过期后可能被域名停放商接管，返回的只是跳转提示页"""
-    return 'parklogic' in resp.text or 'Redirecting...' in resp.text
-
-
 def _request_movie(movie_id: str):
     """请求影片页面
 
@@ -46,7 +41,7 @@ def _request_movie(movie_id: str):
     global base_url
     try:
         resp = request.get(f'{base_url}/{movie_id}', delay_raise=True)
-        if not _looks_parked(resp):
+        if not is_parked(resp):
             return resp
         logger.warning(f'JavBus免代理域名已失效: {base_url}')
     except requests.exceptions.RequestException as e:

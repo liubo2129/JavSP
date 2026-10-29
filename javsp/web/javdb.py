@@ -3,7 +3,7 @@ import os
 import re
 import logging
 
-from javsp.web.base import Request, resp2html
+from javsp.web.base import Request, is_usable, resp2html
 from javsp.web.exceptions import *
 from javsp.func import *
 from javsp.avid import guess_av_type
@@ -22,7 +22,26 @@ permanent_url = 'https://javdb.com'
 if Cfg().network.proxy_server is not None:
     base_url = permanent_url
 else:
-    base_url = str(Cfg().network.proxy_free[CrawlerID.javdb])
+    base_url = str(Cfg().network.proxy_free[CrawlerID.javdb]).rstrip('/')
+
+_base_url_checked = False
+
+
+def check_base_url():
+    """校验配置的免代理地址，失效时退回永久域名
+
+    JavDB的免代理域名经常更换，旧域名过期后会被域名停放商接管（能连上，但返回的是
+    跳转提示页），有的还会因为证书链不完整而直接握手失败。这两种情况都要换成能用的
+    地址，否则抓取会失败。
+    """
+    global base_url, _base_url_checked
+    if _base_url_checked or Cfg().network.proxy_server is not None or base_url == permanent_url:
+        return
+    _base_url_checked = True
+    if is_usable(base_url):
+        return
+    logger.warning(f'JavDB免代理地址不可用（可能已过期或被域名停放）: {base_url}，改用 {permanent_url}')
+    base_url = permanent_url
 
 
 def get_html_wrapper(url):
@@ -108,6 +127,7 @@ def parse_data(movie: MovieInfo):
         movie (MovieInfo): 要解析的影片信息，解析后的信息直接更新到此变量内
     """
     # JavDB搜索番号时会有多个搜索结果，从中查找匹配番号的那个
+    check_base_url()
     html = get_html_wrapper(f'{base_url}/search?q={movie.dvdid}')
     ids = list(map(str.lower, html.xpath("//div[@class='video-title']/strong/text()")))
     movie_urls = html.xpath("//a[@class='box']/@href")
@@ -122,7 +142,7 @@ def parse_data(movie: MovieInfo):
         except (SitePermissionError, CredentialError):
             # 不开VIP不让看，过分。决定榨出能获得的信息，毕竟有时候只有这里能找到标题和封面
             box = html.xpath("//a[@class='box']")[index]
-            movie.url = new_url
+            movie.url = new_url.replace(base_url, permanent_url)
             movie.title = box.get('title')
             movie.cover = box.xpath("div/img/@src")[0]
             score_str = box.xpath("div[@class='score']/span/span")[0].tail
@@ -180,12 +200,14 @@ def parse_data(movie: MovieInfo):
         # 判定影片有码/无码
         subsite = pre_id.split('?')[0]
         movie.uncensored = {'uncensored': True, 'tags':False}.get(subsite)
-    # JavDB目前同时提供男女优信息，根据用来标识性别的符号筛选出女优
-    actors_tag = info.xpath("//strong[text()='演員:']/../span")[0]
-    all_actors = actors_tag.xpath("a/text()")
-    genders = actors_tag.xpath("strong/text()")
-    actress = [i for i in all_actors if genders[all_actors.index(i)] == '♀']
-    magnet = container.xpath("//div[@class='magnet-name column is-four-fifths']/a/@href")
+    # JavDB目前同时提供男女优信息。新版网页用 class="actor-female" 标识女优（男优没有
+    # 这个class），旧版网页用 ♀ 符号标识，两种都兼容。
+    actor_tags = info.xpath("//strong[text()='演員:']/../span")[0].xpath('a')
+    actress = [i.text for i in actor_tags if 'actor-female' in (i.get('class') or '')]
+    if not actress:
+        genders = info.xpath("//strong[text()='演員:']/../span/strong/text()")
+        actress = [i.text for i, gender in zip(actor_tags, genders) if gender == '♀']
+    magnet = container.xpath("//div[contains(@class, 'magnet-name')]/a/@href")
 
     movie.dvdid = dvdid
     movie.url = new_url.replace(base_url, permanent_url)

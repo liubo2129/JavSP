@@ -3,7 +3,7 @@ import logging
 from urllib.parse import urlsplit
 
 
-from javsp.web.base import Request, read_proxy, resp2html
+from javsp.web.base import Request, is_parked, read_proxy, resp2html
 from javsp.web.exceptions import *
 from javsp.web.proxyfree import get_proxy_free_url
 from javsp.config import Cfg, CrawlerID
@@ -34,7 +34,8 @@ def init_network_cfg():
                 continue
             try:
                 resp = request.get(url, delay_raise=True)
-                if resp.status_code == 200:
+                # 域名被停放时也会返回200，需要看内容确认还是不是JavLibrary
+                if resp.status_code == 200 and not is_parked(resp):
                     request.timeout = Cfg().network.timeout.seconds
                     return url
             except Exception as e:

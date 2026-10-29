@@ -18,7 +18,8 @@ from javsp.config import Cfg
 from javsp.web.exceptions import *
 
 
-__all__ = ['Request', 'get_html', 'post_html', 'request_get', 'resp2html', 'is_connectable', 'download', 'get_resp_text', 'read_proxy']
+__all__ = ['Request', 'get_html', 'post_html', 'request_get', 'resp2html', 'is_connectable',
+           'is_parked', 'is_usable', 'download', 'get_resp_text', 'read_proxy']
 
 
 _UA_PLATFORM = 'Macintosh; Intel Mac OS X 10_15_7' if sys.platform == 'darwin' else 'Windows NT 10.0; Win64; x64'
@@ -207,6 +208,29 @@ def is_connectable(url, timeout=3):
     except requests.exceptions.RequestException as e:
         logger.debug(f"Not connectable: {url}\n" + repr(e))
         return False
+
+
+def is_parked(resp) -> bool:
+    """判断响应是否来自域名停放商
+
+    免代理域名过期后可能被域名停放商接管，此时仍会返回 HTTP 200，但内容是一段
+    跳转提示页（加载 parklogic 的脚本），已经不是目标站点的网页了。
+    """
+    return 'parklogic' in resp.text or 'Redirecting...' in resp.text
+
+
+def is_usable(url, timeout=5) -> bool:
+    """判断站点的这个地址是否真的可用
+
+    供免代理地址探测使用。HTTP 4xx/5xx 仍算可用（说明域名还在提供服务，可能只是
+    反爬或地区限制），连接失败、证书链不完整、域名被停放则算不可用。
+    """
+    try:
+        resp = requests.get(url, headers=headers, proxies=read_proxy(), timeout=timeout)
+    except requests.exceptions.RequestException as e:
+        logger.debug(f"Unusable address: {url}\n" + repr(e))
+        return False
+    return not is_parked(resp)
 
 
 def urlretrieve(url, filename=None, reporthook=None, headers=None):
