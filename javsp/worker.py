@@ -311,9 +311,16 @@ def _run(root: str, sink) -> int:
     import_crawlers()
 
     sink(EventKind.SCAN_STARTED, root=root)
-    include_scraped = include_scraped_requested()
+    # 原地更新只对"已整理（目录里有 nfo）"的影片有意义——它存在的目的就是
+    # 重写那批 nfo。因此它**自动蕴含** include_scraped：否则用户只勾了
+    # 「仅更新 NFO」却没勾「包含已整理」，扫描会返回 0 部影片，
+    # 界面显示"识别到 0 部影片"而毫无线索。两个开关在语义上是依赖关系，
+    # 不该把这个推理交给用户。
+    include_scraped = include_scraped_requested() or update_only_requested()
     if include_scraped:
         logger.info('本次扫描包含已整理（含 NFO）的文件夹')
+    if update_only_requested() and not include_scraped_requested():
+        logger.info('「仅更新 NFO」模式已自动包含已整理的文件夹')
     recognized = scan_movies(root, sink=sink, include_scraped=include_scraped)
     summaries = [_movie_summary(m) for m in recognized]
     sink(EventKind.SCAN_FINISHED, movie_count=len(recognized),

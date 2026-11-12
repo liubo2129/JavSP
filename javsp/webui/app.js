@@ -420,8 +420,25 @@
     // 运行中不允许改：它会改变本次扫描/整理的行为，跑一半切换没有意义
     el.chkIncludeScraped.disabled = running;
     el.chkIncludeScrapedId.disabled = running;
+    el.chkUpdateOnly.disabled = running;
+    // 「仅更新 NFO」只对已整理的影片有意义，勾上它时"包含已整理"必须为真，
+    // 否则扫描结果是 0 部影片。这里把它联动勾上并锁住，让依赖关系可见，
+    // 而不是让用户自己去推。
+    syncUpdateOnlyDependency(running);
 
     el.movieCount.textContent = state.movies.size ? `${state.movies.size} 部` : '';
+  }
+
+  /** 「仅更新 NFO」⇒ 自动勾选并锁定「包含已整理」 */
+  function syncUpdateOnlyDependency(running = false) {
+    const on = !!el.chkUpdateOnly.checked;
+    if (on) el.chkIncludeScraped.checked = true;
+    el.chkIncludeScraped.disabled = running || on;
+    const row = document.getElementById('row-include-scraped');
+    if (row) {
+      row.classList.toggle('linked', on);
+      row.title = on ? '「仅更新 NFO」需要扫描已整理的文件夹，已自动勾选' : '';
+    }
   }
 
   function elapsed() {
@@ -979,6 +996,8 @@
       directory: state.directory,
       // 一次性开关：勾选后本次扫描会包含"已整理（有 NFO）"的文件夹
       include_scraped: !!el.chkIncludeScraped.checked,
+      // 「仅更新 NFO」只对已整理的影片有意义，服务端会自动连带 include_scraped
+      update_only: !!el.chkUpdateOnly.checked,
     });
     if (!res.ok) {
       el.scanHint.textContent = '';
@@ -1037,6 +1056,17 @@
   el.dirInput.addEventListener('change', () => setDirectory(el.dirInput.value.trim()));
   el.dirInput.addEventListener('keydown', (e) => {
     if (e.key === 'Enter') { setDirectory(el.dirInput.value.trim()); el.scan.focus(); }
+  });
+
+  // 「仅更新 NFO」勾选状态变化 → 联动「包含已整理」并重绘
+  el.chkUpdateOnly.addEventListener('change', () => {
+    if (!el.chkUpdateOnly.checked) {
+      // 取消时解除锁定，但不擅自取消用户的「包含已整理」勾选
+      el.chkIncludeScraped.disabled = false;
+      const row = document.getElementById('row-include-scraped');
+      if (row) { row.classList.remove('linked'); row.title = ''; }
+    }
+    schedule();
   });
 
   /* ----------------------- 模式切换与番号输入 ----------------------- */

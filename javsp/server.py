@@ -213,7 +213,8 @@ class _Handler(BaseHTTPRequestHandler):
         elif route == '/api/scan':
             directory = (body.get('directory') or '').strip()
             self._send_json(self.state.start_scan(
-                directory, include_scraped=bool(body.get('include_scraped'))))
+                directory, include_scraped=bool(body.get('include_scraped')),
+                update_only=bool(body.get('update_only'))))
         elif route == '/api/start':
             directory = (body.get('directory') or '').strip()
             self._send_json(self.state.start_scrape(
@@ -950,7 +951,11 @@ class GuiServer:
             # 覆盖更新：扫描时把"已整理（含 NFO）"的文件夹也包含进来。
             # 两种模式都支持：目录模式靠它重新扫出旧影片，按番号模式则是
             # 让旧目录被覆盖前先进 .replaced/ 备份。
-            if include_scraped:
+            #
+            # 原地更新**自动**开启它：该模式只对已整理的影片有意义，
+            # 两者不勾在一起就必然扫出 0 部影片（worker 里也做了同样的兜底，
+            # 这里提前统一，保证 scan 预览与正式运行的行为一致）。
+            if include_scraped or update_only:
                 env['JAVSP_INCLUDE_SCRAPED'] = '1'
             else:
                 env.pop('JAVSP_INCLUDE_SCRAPED', None)
@@ -993,14 +998,16 @@ class GuiServer:
                          name='worker-exit', daemon=True).start()
         return {'ok': True, 'pid': proc.pid, 'mode': mode}
 
-    def start_scan(self, directory: str, include_scraped: bool = False) -> Dict[str, Any]:
+    def start_scan(self, directory: str, include_scraped: bool = False,
+                   update_only: bool = False) -> Dict[str, Any]:
         check = _validate_directory(directory)
         if check is not None:
             return check
         # 记录目录：前端拿它当图片接口的 root，也是"当前任务目录"的唯一来源
         self._remember_directory(directory)
         return self._spawn(os.path.abspath(directory), 'scan',
-                           include_scraped=include_scraped)
+                           include_scraped=include_scraped,
+                           update_only=update_only)
 
     # ---------- 设置 ----------
 

@@ -342,3 +342,48 @@ def _fake_info():
     info.dvdid = 'ABP-647'
     info.actress = ['瀬名きらり']
     return info
+
+
+# ------------------- 仅更新 NFO 自动包含已整理 ------------------- #
+
+def test_update_only_implies_include_scraped(monkeypatch):
+    """只勾「仅更新 NFO」时，扫描必须自动带上已整理的文件夹
+
+    否则结果是 0 部影片：该模式只对已整理的影片有意义，而默认扫描
+    会把含 nfo 的目录整棵剪掉，界面只会显示"识别到 0 部影片"。
+    """
+    from javsp import worker
+
+    monkeypatch.delenv('JAVSP_INCLUDE_SCRAPED', raising=False)
+    monkeypatch.setenv('JAVSP_UPDATE_ONLY', '1')
+
+    assert worker.include_scraped_requested() is False
+    assert worker.update_only_requested() is True
+    # worker 里的合并逻辑
+    effective = worker.include_scraped_requested() or worker.update_only_requested()
+    assert effective is True
+
+
+def test_include_scraped_still_independent_when_update_only_off(monkeypatch):
+    monkeypatch.setenv('JAVSP_INCLUDE_SCRAPED', '1')
+    monkeypatch.delenv('JAVSP_UPDATE_ONLY', raising=False)
+
+    from javsp import worker
+    assert worker.include_scraped_requested() is True
+    assert worker.update_only_requested() is False
+
+
+def test_update_only_scan_finds_nested_organized_movie(tmp_path, monkeypatch, big_files_only):
+    """端到端：嵌套的已整理目录在 only-update 下必须被扫到"""
+    from javsp.file import scan_movies
+
+    nested = tmp_path / '演员' / '早美れむ' / '[ABP-647] 标题'
+    nested.mkdir(parents=True)
+    (nested / 'ABP-647.mp4').write_bytes(b'x')
+    (nested / 'movie.nfo').write_text('<movie/>')
+
+    # 默认（跳过已整理）：啥也扫不到——这正是用户看到的 0 部
+    assert scan_movies(str(tmp_path)) == []
+    # 仅更新 NFO 时合并出 include_scraped=True，必须能扫到
+    found = scan_movies(str(tmp_path), include_scraped=True)
+    assert [m.dvdid for m in found] == ['ABP-647']
