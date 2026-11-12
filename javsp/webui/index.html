@@ -150,6 +150,19 @@
           <span class="inline-hint" id="scan-hint"></span>
         </div>
 
+        <!-- 覆盖更新：一次性开关，只影响本次运行，不写回配置 -->
+        <label class="check-row" id="row-include-scraped">
+          <input type="checkbox" id="chk-include-scraped">
+          <span class="check-box" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"
+                 stroke-linecap="round" stroke-linejoin="round"><path d="M4.5 12.5l5 5 10-10"/></svg>
+          </span>
+          <span class="check-text">
+            <span class="check-title">包含已整理（有 NFO）的文件夹</span>
+            <span class="check-note">用于更正旧数据后重新整理；旧目录会被移到 <code>#整理完成/.replaced/</code> 备份</span>
+          </span>
+        </label>
+
         <div class="recent hidden" id="recent">
           <span class="recent-label">最近</span>
           <div class="recent-items" id="recent-items"></div>
@@ -181,6 +194,19 @@
             每个番号会生成 <code>&lt;目标文件夹&gt;/&lt;番号&gt;/</code>，内含 NFO、封面与海报。
           </span>
         </div>
+
+        <!-- 覆盖更新：重新获取时旧目录进 <目标>/.replaced/ 备份 -->
+        <label class="check-row" id="row-include-scraped-id">
+          <input type="checkbox" id="chk-include-scraped-id">
+          <span class="check-box" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"
+                 stroke-linecap="round" stroke-linejoin="round"><path d="M4.5 12.5l5 5 10-10"/></svg>
+          </span>
+          <span class="check-text">
+            <span class="check-title">覆盖已存在的番号目录</span>
+            <span class="check-note">重新获取并覆盖旧结果；旧目录会被移到 <code>&lt;目标文件夹&gt;/.replaced/</code> 备份</span>
+          </span>
+        </label>
       </section>
 
       <!-- 预览 -->
@@ -261,6 +287,22 @@
           <button class="btn primary" id="settings-save" type="button">保存</button>
         </div>
       </footer>
+
+      <!-- 备份清理：独立分区，不参与"保存"，点一下立刻执行 -->
+      <section class="backup-panel">
+        <div class="backup-head">
+          <h3>覆盖整理留下的备份</h3>
+          <span class="backup-usage" id="backup-usage">正在统计…</span>
+        </div>
+        <p class="backup-note">
+          重新整理时旧目录会被移到 <code>.replaced/</code> 备份（不删除）。
+          确认新结果没问题后可以在这里清掉，释放磁盘空间。
+        </p>
+        <div class="backup-actions">
+          <button class="btn ghost" id="backup-reveal" type="button">在访达中显示</button>
+          <button class="btn ghost danger-text" id="backup-clean" type="button" disabled>清理备份</button>
+        </div>
+      </section>
     </div>
   </div>
 

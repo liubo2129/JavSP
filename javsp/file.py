@@ -6,11 +6,15 @@ import ctypes
 import logging
 import itertools
 import json
+import shutil
+import time
 from sys import platform
 from typing import List
 
 
-__all__ = ['scan_movies', 'get_fmt_size', 'get_remaining_path_len', 'replace_illegal_chars', 'get_failed_when_scan', 'find_subtitle_in_dir']
+__all__ = ['scan_movies', 'get_fmt_size', 'get_remaining_path_len', 'replace_illegal_chars',
+           'get_failed_when_scan', 'find_subtitle_in_dir', 'backup_existing_dir',
+           '_dir_has_nfo', 'REPLACED_DIR_NAME']
 
 
 from javsp.avid import *
@@ -26,8 +30,26 @@ failed_items = []
 # 进入新目录时无论如何都会上报一次，保证"当前在扫描哪个目录"始终是新的。
 _SCAN_PROGRESS_INTERVAL = 50
 
+# 重新整理时旧目录的备份目录名（以点开头，会被 ignored_folder_name_pattern
+# 的 '^\.' 规则跳过，不会再被扫描进来）
+REPLACED_DIR_NAME = '.replaced'
 
-def scan_movies(root: str, sink=None) -> List[Movie]:
+
+def _dir_has_nfo(path: str) -> bool:
+    """目录下是否有 nfo 文件（只看这一层，不递归）
+
+    用于判断"这个文件夹里的影片是不是已经整理过了"。读目录失败的
+    （权限、竞态删除）视为没有，不能让一次 stat 失败毁掉整轮扫描。
+    """
+    try:
+        entries = os.listdir(path)
+    except OSError as e:
+        logger.debug(f'无法读取子目录，按未整理处理: {path}: {e}')
+        return False
+    return any(isinstance(n, str) and n.lower().endswith('.nfo') for n in entries)
+
+
+def scan_movies(root: str, sink=None, include_scraped: bool = False) -> List[Movie]:
     """获取文件夹内的所有影片的列表（自动探测同一文件夹内的分片）
 
     Args:
@@ -35,6 +57,9 @@ def scan_movies(root: str, sink=None) -> List[Movie]:
         sink: 可选的事件接收方。传入时会上报细粒度扫描进度，便于 GUI 展示
               "正在扫描哪个目录、已发现多少个影片"。为 None 时不产生任何事件，
               既有 CLI 行为不变。
+        include_scraped: 是否把"已整理过（目录里有 nfo）"的文件夹也纳入扫描。
+              默认 False，沿用 ``scanner.skip_nfo_dir`` 的剪枝行为；
+              传 True 时强制递归进去，用于更正旧数据后重新整理。
     """
     # 由于实现的限制: 
     # 1. 以数字编号最多支持10个分片，字母编号最多支持26个分片
@@ -50,17 +75,21 @@ def scan_movies(root: str, sink=None) -> List[Movie]:
     video_count = 0
     unrecognized = 0
     last_reported_dir = None
+    skip_scraped = Cfg().scanner.skip_nfo_dir and not include_scraped
     ignore_folder_name_pattern = re.compile('|'.join(Cfg().scanner.ignored_folder_name_pattern))
     for dirpath, dirnames, filenames in os.walk(root):
         dir_count += 1
         for name in dirnames.copy():
             if ignore_folder_name_pattern.match(name):
                 dirnames.remove(name)
+                # 命中忽略规则就直接剪掉，不能再走下面的 nfo 判断：
+                # 同一个名字 remove 两次会抛 ValueError（输出目录里有
+                # movie.nfo 是很常见的情况，那会让整轮扫描直接崩掉）。
+                continue
             # 移除有nfo的文件夹
-            if Cfg().scanner.skip_nfo_dir:
-                if any(file.lower().endswith(".nfo") for file in os.listdir(os.path.join(dirpath, name)) if isinstance(file, str)):
-                    print(f"skip file {name}")
-                    dirnames.remove(name)
+            if skip_scraped and _dir_has_nfo(os.path.join(dirpath, name)):
+                logger.debug(f'跳过已整理的文件夹: {name}')
+                dirnames.remove(name)
         # 每进入一个新目录就上报一次，使侧边栏在遍历大量小文件时也能持续更新
         if sink is not None and dirpath != last_reported_dir:
             last_reported_dir = dirpath
@@ -242,6 +271,50 @@ def replace_illegal_chars(name):
     if os.pardir in name:
         name = _PARDIR_REPLACE.sub('…', name)
     return name
+
+
+def backup_existing_dir(target_dir: str, anchor: str | None = None) -> str | None:
+    """把已存在的目标目录移到同级的 ``.replaced/`` 里备份
+
+    重新整理一部**已经整理过**的影片时，新数据写进 ``target_dir`` 之前，
+    旧目录里可能还有上一次的 nfo/封面/影片。直接覆盖会让旧文件混在新结果里
+    （例如换了女优导致目录名变化时，旧目录会整个留下来变成重复项），
+    因此统一把它挪进 ``<anchor>/.replaced/`` —— 不删除、可回滚。
+
+    以点开头，因此不会被 ``ignored_folder_name_pattern`` 的 ``^\\.``
+    规则以外的扫描逻辑误收；``.replaced`` 自己也会被该规则跳过。
+
+    Args:
+        target_dir: 即将被写入的目录（当前已存在的那个）
+        anchor: 备份根目录。留在同一个"整理根"下最便于用户找回，
+                缺省时取 target_dir 的父目录。
+
+    Returns:
+        备份后的新路径；没有需要备份的目录时返回 None。
+    """
+    if not target_dir or not os.path.isdir(target_dir):
+        return None
+    base = anchor or os.path.dirname(os.path.normpath(target_dir))
+    backup_root = os.path.join(base, REPLACED_DIR_NAME)
+    os.makedirs(backup_root, exist_ok=True)
+    name = os.path.basename(os.path.normpath(target_dir))
+    dest = os.path.join(backup_root, name)
+    # 同名冲突（同一部影片被反复更新）：加时间戳，绝不覆盖更早的备份
+    if os.path.exists(dest):
+        stamp = time.strftime('%Y%m%d-%H%M%S')
+        dest = os.path.join(backup_root, f'{name}.{stamp}')
+        index = 1
+        while os.path.exists(dest):
+            dest = os.path.join(backup_root, f'{name}.{stamp}-{index}')
+            index += 1
+    try:
+        shutil.move(target_dir, dest)
+    except OSError as e:
+        # 备份失败不能让影片整理中断：退回"原地覆盖"，并在日志里说清楚
+        logger.warning(f'无法备份旧目录，将原地覆盖: {target_dir}: {e}')
+        return None
+    logger.info(f'已把旧目录备份到: {dest}')
+    return dest
 
 
 def is_remote_drive(path: str):

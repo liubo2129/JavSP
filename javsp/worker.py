@@ -53,6 +53,16 @@ BY_ID_DIR_ENV = 'JAVSP_BY_ID_DIR'
 # 待获取的番号，多个用空白、逗号或分号分隔
 BY_ID_IDS_ENV = 'JAVSP_BY_ID_IDS'
 
+# 置为 '1' 时，扫描包含"已整理（目录里有 nfo）"的文件夹，
+# 用于更正旧数据后重新整理。与配置里的 scanner.skip_nfo_dir 是"与"关系：
+# 这里只负责本次运行强制打开，不会写回配置文件。
+INCLUDE_SCRAPED_ENV_FLAG = 'JAVSP_INCLUDE_SCRAPED'
+
+
+def include_scraped_requested() -> bool:
+    """本次运行是否要扫描已整理的文件夹"""
+    return os.environ.get(INCLUDE_SCRAPED_ENV_FLAG) == '1'
+
 # 输入番号时可能用到的分隔符（含中文标点）
 _ID_SEPARATORS = re.compile(r'[\s,，;；、|/]+')
 
@@ -278,7 +288,10 @@ def _run(root: str, sink) -> int:
     import_crawlers()
 
     sink(EventKind.SCAN_STARTED, root=root)
-    recognized = scan_movies(root, sink=sink)
+    include_scraped = include_scraped_requested()
+    if include_scraped:
+        logger.info('本次扫描包含已整理（含 NFO）的文件夹')
+    recognized = scan_movies(root, sink=sink, include_scraped=include_scraped)
     summaries = [_movie_summary(m) for m in recognized]
     sink(EventKind.SCAN_FINISHED, movie_count=len(recognized),
          movies=summaries,

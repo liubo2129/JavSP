@@ -84,18 +84,22 @@
     startLabel: $('btn-start-label'), previewTitle: $('preview-title'),
     targetInput: $('target-input'), browseTarget: $('btn-browse-target'),
     idsInput: $('ids-input'), idHint: $('id-hint'),
+    chkIncludeScraped: $('chk-include-scraped'),
+    chkIncludeScrapedId: $('chk-include-scraped-id'),
     lightbox: $('lightbox'), lbImg: $('lb-img'), lbClose: $('lb-close'),
     lbPrev: $('lb-prev'), lbNext: $('lb-next'), lbCounter: $('lb-counter'),
     brand: $('brand'), settings: $('settings'), settingsBody: $('settings-body'),
     settingsClose: $('settings-close'), settingsCancel: $('settings-cancel'),
     settingsSave: $('settings-save'), settingsReset: $('settings-reset'),
     settingsHint: $('settings-hint'),
+    backupUsage: $('backup-usage'), backupClean: $('backup-clean'),
+    backupReveal: $('backup-reveal'),
   };
 
   /* ---------------------------- 设置面板 ---------------------------- */
   // 站点清单由服务端给出（含出厂默认），前端不硬编码——
   // config.yml 历史上就漏配过 5 个抓取器，清单必须只有一处来源。
-  const settings = { open: false, data: null, selection: null, dirty: false };
+  const settings = { open: false, data: null, selection: null, dirty: false, maxWorkers: 1 };
 
   async function openSettings() {
     settings.open = true;
@@ -116,11 +120,59 @@
         settings.selection[g.key] = new Set(
           g.crawlers.filter((c) => c.enabled).map((c) => c.id));
       }
+      settings.maxWorkers = data.max_workers || 1;
       renderSettings();
     } catch (e) {
       el.settingsBody.innerHTML =
         `<div class="pc-note"><span>无法读取设置：${esc(e.message || e)}</span></div>`;
     }
+    // 备份用量与设置无关，单独刷新（失败不影响设置面板本身）
+    refreshBackupUsage();
+  }
+
+  /** 刷新备份体积与"清理"按钮可用性 */
+  async function refreshBackupUsage() {
+    el.backupUsage.textContent = '正在统计…';
+    el.backupUsage.classList.remove('has-data');
+    el.backupClean.disabled = true;
+    // api() 自身兜住网络异常，返回 {ok:false}，这里只需判断 ok
+    const res = await api('/api/backups', { directory: state.directory || '' });
+    if (!res || !res.ok) {
+      el.backupUsage.textContent = '无法统计';
+      return;
+    }
+    settings.backup = res;
+    if (!res.bytes) {
+      el.backupUsage.textContent = '没有备份';
+      return;
+    }
+    el.backupUsage.textContent = `${res.human} · ${res.files} 个文件`;
+    el.backupUsage.classList.add('has-data');
+    el.backupUsage.title = (res.roots || []).map((r) => r.path).join('\n');
+    el.backupClean.disabled = false;
+  }
+
+  /** 清理备份：不可恢复，必须先确认 */
+  async function cleanBackups() {
+    if (el.backupClean.disabled) return;
+    const usage = settings.backup || {};
+    const ok = window.confirm(
+      `确定删除全部备份吗？\n\n将永久删除 ${usage.human || ''}（${usage.files || 0} 个文件）\n` +
+      (usage.roots || []).map((r) => r.path).join('\n') +
+      '\n\n此操作不可恢复。');
+    if (!ok) return;
+    el.backupClean.disabled = true;
+    const res = await api('/api/backups/clean', { directory: state.directory || '' });
+    if (!res || !res.ok) {
+      el.backupUsage.textContent = '清理失败';
+      pushLog('清理备份失败: ' + ((res && (res.message || res.error)) || '未知错误'), 'err');
+      toast(((res && res.message) || '清理失败'), 'err');
+      el.backupClean.disabled = false;
+      return;
+    }
+    pushLog(res.message || '已清理备份', 'ok');
+    toast(res.message || '已清理备份', 'ok');
+    refreshBackupUsage();
   }
 
   function closeSettings() {
@@ -364,6 +416,9 @@
     el.targetInput.disabled = running;
     el.tabDir.disabled = running;
     el.tabId.disabled = running;
+    // 运行中不允许改：它会改变本次扫描/整理的行为，跑一半切换没有意义
+    el.chkIncludeScraped.disabled = running;
+    el.chkIncludeScrapedId.disabled = running;
 
     el.movieCount.textContent = state.movies.size ? `${state.movies.size} 部` : '';
   }
@@ -919,7 +974,11 @@
   el.scan.addEventListener('click', async () => {
     if (!state.directory) return;
     el.scanHint.textContent = '正在扫描…';
-    const res = await api('/api/scan', { directory: state.directory });
+    const res = await api('/api/scan', {
+      directory: state.directory,
+      // 一次性开关：勾选后本次扫描会包含"已整理（有 NFO）"的文件夹
+      include_scraped: !!el.chkIncludeScraped.checked,
+    });
     if (!res.ok) {
       el.scanHint.textContent = '';
       const msg = res.message || res.error || '';
@@ -936,6 +995,8 @@
       if (!ids.length) { toast('请先输入番号', 'warn'); return; }
       const res = await api('/api/start_by_id', {
         folder: state.targetFolder, ids: ids.join('\n'),
+        // 覆盖已存在的 <番号> 目录：旧目录会先进 .replaced/ 备份
+        include_scraped: !!el.chkIncludeScrapedId.checked,
       });
       if (!res.ok) {
         const msg = res.message || res.error || '';
@@ -946,7 +1007,10 @@
     }
     if (!state.directory) return;
     pushRecent(state.directory);
-    const res = await api('/api/start', { directory: state.directory });
+    const res = await api('/api/start', {
+      directory: state.directory,
+      include_scraped: !!el.chkIncludeScraped.checked,
+    });
     if (!res.ok) {
       const msg = res.message || res.error || '';
       pushLog('无法开始: ' + msg, 'err');
@@ -1013,6 +1077,22 @@
   el.settingsCancel.addEventListener('click', closeSettings);
   el.settingsSave.addEventListener('click', saveSettings);
   el.settingsReset.addEventListener('click', resetSettingsToDefault);
+
+  // 备份清理：与"保存"无关，点一下立刻生效
+  el.backupClean.addEventListener('click', cleanBackups);
+  el.backupReveal.addEventListener('click', async () => {
+    const roots = (settings.backup && settings.backup.roots) || [];
+    if (!roots.length) {
+      toast('没有可显示的备份目录', 'warn');
+      return;
+    }
+    // 只在访达里定位第一处；多处备份会把路径写进日志备查
+    if (roots.length > 1) {
+      pushLog('备份目录: ' + roots.map((r) => r.path).join(' | '));
+    }
+    const res = await api('/api/reveal', { path: roots[0].path });
+    if (!res.ok) toast(res.message || '无法在访达中显示', 'err');
+  });
 
   // 点遮罩空白处关闭（点对话框内部不关）
   el.settings.addEventListener('click', (e) => {

@@ -667,6 +667,80 @@ def _planned_steps(movies=None):
     return steps
 
 
+def _backup_anchor(movie) -> str | None:
+    """重新整理时旧目录备份到哪个目录下
+
+    * 按番号获取：目标文件夹（``<目标>/<番号>`` 的上一级）
+    * 按目录整理：``output_folder_pattern`` 的第一段（默认就是 ``#整理完成``），
+      这样备份统一落在 ``#整理完成/.replaced/``，用户容易找到。
+    """
+    if getattr(movie, 'by_id_mode', False):
+        return getattr(movie, 'by_id_folder', '') or None
+    pattern = str(Cfg().summarizer.path.output_folder_pattern).replace('\\', '/')
+    head = pattern.split('/')[0].strip()
+    # 第一段带占位符时无法当作固定根目录，退回目标目录的父级
+    if not head or '{' in head:
+        if not movie.save_dir:
+            return None
+        return os.path.dirname(os.path.abspath(movie.save_dir))
+    return os.path.join(os.getcwd(), head)
+
+
+def _is_organized_dir(path: str) -> bool:
+    """目录是否是"整理过的产物"（里面有 nfo）"""
+    return bool(path) and os.path.isdir(path) and _dir_has_nfo(path)
+
+
+def _backup_before_rewrite(movie) -> List[str]:
+    """写新产物之前，把旧的整理目录挪进 ``.replaced/`` 备份
+
+    为什么必须要备份而不是直接覆盖：修正旧数据后命名规则往往生成**不同**的
+    目录（换女优、标题变了），旧目录会原封不动留下来，同一个番号出现两份。
+    把旧目录整体搬走既避免重复，又让用户随时能回滚。
+
+    关键点：搬走的目录里可能就放着这部影片的视频文件。因此备份后要同步
+    改写 ``movie.files`` 指向新位置，后面的 ``rename_files`` 才能把影片
+    从备份里移回整理目录；否则会报"文件不存在"。
+
+    Returns:
+        被备份出来的路径列表（供日志/事件展示）。
+    """
+    anchor = _backup_anchor(movie)
+    if not anchor:
+        return []
+
+    # 视频当前所在目录优先（它一定是这部影片的旧产物）
+    source_dir = ''
+    if movie.files:
+        source_dir = os.path.dirname(os.path.abspath(movie.files[0]))
+    target_dir = os.path.abspath(movie.save_dir) if movie.save_dir else ''
+
+    backed_up: List[str] = []
+    candidates = []
+    if _is_organized_dir(source_dir):
+        candidates.append(source_dir)
+    # 目标目录已存在且不是源目录：它可能是上一次整理的残留
+    if target_dir and os.path.isdir(target_dir) and target_dir not in candidates:
+        candidates.append(target_dir)
+
+    for path in candidates:
+        dest = backup_existing_dir(path, anchor=anchor)
+        if not dest:
+            continue
+        backed_up.append(dest)
+        # 影片文件跟着目录一起被搬走了，改写引用指向备份里的新位置
+        if movie.files:
+            moved = []
+            for f in movie.files:
+                abs_f = os.path.abspath(f)
+                if abs_f.startswith(path + os.sep):
+                    moved.append(os.path.join(dest, os.path.relpath(abs_f, path)))
+                else:
+                    moved.append(f)
+            movie.files = moved
+    return backed_up
+
+
 def _process_movie(movie, index: int, total_movies: int, steps: List[str],
                    sink, event_mode: bool, inner_bar) -> bool:
     """整理单部影片（跑完整条管线），返回是否成功
@@ -716,6 +790,11 @@ def _process_movie(movie, index: int, total_movies: int, steps: List[str],
         current_step = 'generate_names'
         generate_names(movie)
         check_step(movie.save_dir, 'generate_names', '无法按命名规则生成目标文件夹')
+
+        # 覆盖整理：写新产物之前先把旧的整理目录挪进 .replaced/ 备份。
+        # 必须在 makedirs / 下载封面之前——那些操作会往目标目录里写文件，
+        # 一旦目录被当成"旧产物"整目录搬走，刚下载的东西就跟着进备份了。
+        backed_up = _backup_before_rewrite(movie)
 
         # exist_ok：并行整理时多部影片可能同时落到并集目录下（父目录/女优目录相同）
         os.makedirs(movie.save_dir, exist_ok=True)
@@ -796,6 +875,8 @@ def _process_movie(movie, index: int, total_movies: int, steps: List[str],
              save_dir=os.path.abspath(movie.save_dir) if movie.save_dir else None,
              nfo_file=os.path.abspath(movie.nfo_file) if movie.nfo_file else None,
              paths=final_paths,
+             # 覆盖整理时把旧目录备份到了哪里，供界面提示"可回滚到此处"
+             replaced_to=backed_up or None,
              title=getattr(movie.info, 'nfo_title', None))
         return True
     except Exception as e:

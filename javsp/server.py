@@ -212,16 +212,25 @@ class _Handler(BaseHTTPRequestHandler):
             self._send_json(self.state.select_directory(body.get('initial') or ''))
         elif route == '/api/scan':
             directory = (body.get('directory') or '').strip()
-            self._send_json(self.state.start_scan(directory))
+            self._send_json(self.state.start_scan(
+                directory, include_scraped=bool(body.get('include_scraped'))))
         elif route == '/api/start':
             directory = (body.get('directory') or '').strip()
-            self._send_json(self.state.start_scrape(directory))
+            self._send_json(self.state.start_scrape(
+                directory, include_scraped=bool(body.get('include_scraped'))))
         elif route == '/api/start_by_id':
             self._send_json(self.state.start_by_id(
-                body.get('folder') or '', body.get('ids') or ''))
+                body.get('folder') or '', body.get('ids') or '',
+                include_scraped=bool(body.get('include_scraped'))))
         elif route == '/api/settings/crawler_selection':
             self._send_json(self.state.update_crawler_selection(
                 body.get('selection') or {}))
+        elif route == '/api/settings/concurrency':
+            self._send_json(self.state.update_concurrency(body.get('max_workers')))
+        elif route == '/api/backups':
+            self._send_json(self.state.backup_usage(body.get('directory') or ''))
+        elif route == '/api/backups/clean':
+            self._send_json(self.state.clean_backups(body.get('directory') or ''))
         elif route == '/api/stop':
             self._send_json(self.state.stop())
         elif route == '/api/log_tail':
@@ -520,6 +529,36 @@ def _numeric_prefix(stem: str) -> int:
         else:
             break
     return int(digits) if digits else 1 << 30
+
+
+def _human_size(size: int) -> str:
+    """把字节数转成便于阅读的体积字符串"""
+    value = float(size)
+    for unit in ('B', 'KB', 'MB', 'GB', 'TB'):
+        if value < 1024 or unit == 'TB':
+            return f'{value:.0f} {unit}' if unit == 'B' else f'{value:.1f} {unit}'
+        value /= 1024
+    return f'{value:.1f} TB'
+
+
+def _dir_usage(root: Path) -> tuple:
+    """统计目录内所有普通文件的总体积与文件数
+
+    只累加普通文件；符号链接按"不跟随"处理（避免绕出目录或重复计数）。
+    """
+    total = 0
+    count = 0
+    for dirpath, _dirnames, filenames in os.walk(root):
+        for name in filenames:
+            full = os.path.join(dirpath, name)
+            try:
+                if os.path.islink(full):
+                    continue
+                total += os.path.getsize(full)
+                count += 1
+            except OSError:
+                continue
+    return total, count
 
 
 def _is_within(path: str, root: Optional[str]) -> bool:
@@ -877,7 +916,8 @@ class GuiServer:
         cmd += list(self.extra_args)
         return cmd
 
-    def _spawn(self, directory: str, mode: str, ids: str = '') -> Dict[str, Any]:
+    def _spawn(self, directory: str, mode: str, ids: str = '',
+               include_scraped: bool = False) -> Dict[str, Any]:
         with self._lock:
             if self._is_running_locked():
                 return {'ok': False, 'error': 'busy',
@@ -904,6 +944,13 @@ class GuiServer:
                 env.pop('JAVSP_BY_ID', None)
                 env.pop('JAVSP_BY_ID_DIR', None)
                 env.pop('JAVSP_BY_ID_IDS', None)
+            # 覆盖更新：扫描时把"已整理（含 NFO）"的文件夹也包含进来。
+            # 两种模式都支持：目录模式靠它重新扫出旧影片，按番号模式则是
+            # 让旧目录被覆盖前先进 .replaced/ 备份。
+            if include_scraped:
+                env['JAVSP_INCLUDE_SCRAPED'] = '1'
+            else:
+                env.pop('JAVSP_INCLUDE_SCRAPED', None)
             # 从源码运行时需要让子进程能找到 javsp 包
             if not getattr(sys, 'frozen', False):
                 root = str(Path(__file__).resolve().parent.parent)
@@ -937,13 +984,14 @@ class GuiServer:
                          name='worker-exit', daemon=True).start()
         return {'ok': True, 'pid': proc.pid, 'mode': mode}
 
-    def start_scan(self, directory: str) -> Dict[str, Any]:
+    def start_scan(self, directory: str, include_scraped: bool = False) -> Dict[str, Any]:
         check = _validate_directory(directory)
         if check is not None:
             return check
         # 记录目录：前端拿它当图片接口的 root，也是"当前任务目录"的唯一来源
         self._remember_directory(directory)
-        return self._spawn(os.path.abspath(directory), 'scan')
+        return self._spawn(os.path.abspath(directory), 'scan',
+                           include_scraped=include_scraped)
 
     # ---------- 设置 ----------
 
@@ -1048,11 +1096,151 @@ class GuiServer:
         return {'ok': True, 'selection': normalized, 'settings_file': str(path),
                 'message': '设置已保存，将在下一次任务生效'}
 
-    def start_by_id(self, folder: str, ids_text: str) -> Dict[str, Any]:
+    def update_concurrency(self, value: Any) -> Dict[str, Any]:
+        """保存并发数（同时整理几部影片）
+
+        上限由 ``MAX_WORKERS_LIMIT`` 兜住：这个数字直接决定同时向各站点
+        发多少请求，越界没有意义，也容易让整批任务一起被限流。
+        """
+        from javsp.settings import MAX_WORKERS_LIMIT, normalize_max_workers, save_max_workers
+
+        requested = value
+        try:
+            workers = save_max_workers(value)
+        except OSError as e:
+            logger.warning('保存并发数失败: %s', e, exc_info=True)
+            return {'ok': False, 'error': 'save_failed',
+                    'message': f'无法写入设置文件: {e}'}
+
+        self._emit('gui.settings_changed', section='concurrency')
+        message = '并发数已保存，将在下一次任务生效'
+        try:
+            clamped = normalize_max_workers(requested) != int(requested)
+        except (TypeError, ValueError):
+            clamped = True
+        if clamped:
+            message = f'并发数超出范围，已调整为 {workers}（允许 1-{MAX_WORKERS_LIMIT}）'
+        return {'ok': True, 'max_workers': workers, 'message': message}
+
+    # ---------- 备份目录（.replaced） ----------
+
+    def _backup_roots(self, directory: str = '') -> List[Path]:
+        """列出该目录下可能存在的备份根
+
+        备份有两处来源，都要覆盖到：
+
+        * ``<目录>/.replaced``          —— 按番号模式（<目标>/<番号> 的上一级）
+        * ``<目录>/#整理完成/.replaced`` —— 按目录整理模式
+
+        只返回**真实存在**的目录，避免把不存在的路径报给前端。
+        """
+        base = directory or self._directory or ''
+        if not base:
+            return []
+        from javsp.file import REPLACED_DIR_NAME
+
+        roots = []
+        for candidate in (Path(base) / REPLACED_DIR_NAME,
+                          Path(base) / '#整理完成' / REPLACED_DIR_NAME):
+            try:
+                if candidate.is_dir():
+                    roots.append(candidate.resolve())
+            except OSError:
+                continue
+        return roots
+
+    def backup_usage(self, directory: str = '') -> Dict[str, Any]:
+        """统计备份占用了多少空间
+
+        清理前先让用户看到"要删的是多少东西"，避免误点到不可恢复的操作。
+        """
+        roots = self._backup_roots(directory)
+        total_bytes = 0
+        total_entries = 0
+        roots_out = []
+        for root in roots:
+            root_bytes, root_entries = _dir_usage(root)
+            total_bytes += root_bytes
+            total_entries += root_entries
+            roots_out.append({'path': str(root), 'bytes': root_bytes,
+                              'files': root_entries})
+        return {
+            'ok': True,
+            'roots': roots_out,
+            'bytes': total_bytes,
+            'files': total_entries,
+            'human': _human_size(total_bytes),
+        }
+
+    def clean_backups(self, directory: str = '') -> Dict[str, Any]:
+        """删除 ``.replaced`` 备份目录
+
+        安全边界（缺一不可）：
+
+        * 只处理 ``_backup_roots`` 认出来的那两个固定位置，不接受任意路径
+        * 目标必须确实叫 ``.replaced``，防止路径被拼错时误删真实影片目录
+        * 必须位于本次任务目录之内
+        * 删除用 ``shutil.rmtree``，失败逐条汇报而不是静默忽略
+        """
+        from javsp.file import REPLACED_DIR_NAME
+
+        base = directory or self._directory or ''
+        if not base:
+            return {'ok': False, 'error': 'no_directory',
+                    'message': '请先选择影片目录'}
+        if self.is_running():
+            return {'ok': False, 'error': 'busy',
+                    'message': '任务运行中，请先停止再清理'}
+
+        roots = self._backup_roots(base)
+        if not roots:
+            return {'ok': True, 'removed': [], 'failed': [], 'bytes': 0, 'files': 0,
+                    'human': _human_size(0), 'message': '没有需要清理的备份'}
+
+        removed = []
+        failed = []
+        freed = 0
+        files = 0
+        for root in roots:
+            # 双重校验：名字必须是 .replaced，且必须在任务目录之内
+            if root.name != REPLACED_DIR_NAME or not _is_within(str(root), base):
+                failed.append({'path': str(root), 'reason': 'refused'})
+                continue
+            size, count = _dir_usage(root)
+            try:
+                shutil.rmtree(root)
+            except OSError as e:
+                logger.warning('清理备份失败: %s: %s', root, e, exc_info=True)
+                failed.append({'path': str(root), 'reason': str(e)})
+                continue
+            freed += size
+            files += count
+            removed.append({'path': str(root), 'bytes': size, 'files': count})
+
+        if not removed and failed:
+            return {'ok': False, 'error': 'remove_failed',
+                    'message': f'无法删除备份: {failed[0]["reason"]}',
+                    'failed': failed}
+        return {
+            'ok': True,
+            'removed': removed,
+            'failed': failed,
+            'bytes': freed,
+            'files': files,
+            'human': _human_size(freed),
+            'message': f'已清理 {len(removed)} 处备份（{_human_size(freed)}）',
+        }
+
+    def start_by_id(self, folder: str, ids_text: str,
+                    include_scraped: bool = False) -> Dict[str, Any]:
         """按番号获取元数据
 
         与"按目录"不同：不扫描任何目录，直接按给定番号抓取，
         结果写入 ``<folder>/<番号>/``。目标文件夹允许不存在（会自动创建）。
+
+        ``include_scraped`` 在按番号模式下不发散成"多扫几个文件"，而是
+        允许覆盖已存在的 ``<番号>/`` 目录——旧目录会被移进
+        ``<目标文件夹>/.replaced/`` 备份后再写入新结果。
         """
         from javsp.worker import parse_movie_ids
 
@@ -1079,7 +1267,8 @@ class GuiServer:
                     'message': f'目标文件夹不可写: {folder}'}
 
         self._remember_directory(folder)
-        return self._spawn(folder, 'by_id', ids='\n'.join(ids))
+        return self._spawn(folder, 'by_id', ids='\n'.join(ids),
+                           include_scraped=include_scraped)
 
     def _remember_directory(self, directory: str) -> None:
         """记住本次任务使用的目录
@@ -1091,12 +1280,13 @@ class GuiServer:
             self._directory = os.path.abspath(directory)
         self._emit('gui.directory_changed', directory=self._directory)
 
-    def start_scrape(self, directory: str) -> Dict[str, Any]:
+    def start_scrape(self, directory: str, include_scraped: bool = False) -> Dict[str, Any]:
         check = _validate_directory(directory)
         if check is not None:
             return check
         self._remember_directory(directory)
-        return self._spawn(os.path.abspath(directory), 'scrape')
+        return self._spawn(os.path.abspath(directory), 'scrape',
+                           include_scraped=include_scraped)
 
     def _read_events(self, proc: subprocess.Popen) -> None:
         """逐行解析 worker 的 NDJSON 事件并广播"""
