@@ -425,6 +425,22 @@ def info_summary(movie: Movie, all_info: Dict[str, MovieInfo]):
     movie.info = final_info
     return True
 
+def _is_update_only(movie) -> bool:
+    """本次是否"原地更新"这部影片（只重写 nfo/封面，不移动、不改名）
+
+    与 ``summarizer.move_files: false`` 不是一回事：那个是全局的、连首次
+    整理都不归档；这里是**按影片**的一次性模式，只用于"目录已经整理过、
+    只想更正数据"的场景。
+
+    需要同时满足两个条件：
+
+    * 本次任务处于原地更新模式（``movie.update_only``）
+    * 影片确实有源文件。按番号获取模式没有输入文件，它本来就不会移动，
+      走正常的命名逻辑即可。
+    """
+    return bool(getattr(movie, 'update_only', False)) and bool(movie.files)
+
+
 def generate_names(movie: Movie):
     """按照模板生成相关文件的文件名"""
 
@@ -455,7 +471,13 @@ def generate_names(movie: Movie):
     # 生成nfo文件中的影片标题
     nfo_title = Cfg().summarizer.nfo.title_pattern.format(**d)
     setattr(info, 'nfo_title', nfo_title)
-    
+
+    if _is_update_only(movie):
+        # 原地更新：完全沿用影片当前所在目录与文件名。
+        # 不进入下面的截短循环——它的一切目的都是"凑出一个新的路径"，
+        # 而这里恰恰不需要新路径。
+        return _generate_names_in_place(movie, d)
+
     # 使用字典填充模板，生成相关文件的路径（多分片影片要考虑CD-x部分）
     cdx = '' if len(movie.files) <= 1 else '-CD1'
     if hasattr(info, 'title_break'):
@@ -534,6 +556,76 @@ def generate_names(movie: Movie):
 
 # 按番号获取模式：输出到 <nfo_folder>/<番号>/，文件名用番号
 BY_ID_BASENAME_PATTERN = '{num}'
+
+
+def _find_sidecar_dir(dirpath: str, preferred: str, suffix: str) -> str:
+    """在目录里找一个已存在的附属文件（nfo/封面等），返回其完整路径
+
+    **保留原有文件名**是原地更新的关键：用户的目录里可能叫 ``movie.nfo``，
+    也可能叫 ``ABP-647.nfo``，还可能已经把封面改名成 ``poster.jpg`` 之外的名字。
+    一律沿用原名，才不会凭空多出一套并列文件。
+    """
+    for name in (preferred, preferred.lower(), preferred.upper()):
+        candidate = os.path.join(dirpath, name + suffix)
+        if os.path.isfile(candidate):
+            return candidate
+    # 按扩展名兜底：目录里只要已经有一个该类型的文件就沿用它
+    try:
+        for entry in os.listdir(dirpath):
+            if entry.lower().endswith(suffix):
+                return os.path.join(dirpath, entry)
+    except OSError:
+        pass
+    return ''
+
+
+def _generate_names_in_place(movie, d):
+    """原地更新模式：各产物沿用影片当前所在目录，不移动也不改名
+
+    目录取视频文件当前所在目录；nfo/封面沿用同目录里已有的文件名，
+    只有确实不存在时才按配置的 ``basename_pattern`` 新建。
+    """
+    save_dir = os.path.dirname(os.path.abspath(movie.files[0]))
+    movie.save_dir = save_dir
+    # 视频文件保持原名，basename 只用于日志与（不会发生的）移动
+    video_basename = os.path.splitext(os.path.basename(movie.files[0]))[0]
+    movie.basename = video_basename
+
+    nfo_base = Cfg().summarizer.nfo.basename_pattern.format(**d)
+    fanart_base = Cfg().summarizer.fanart.basename_pattern.format(**d)
+    poster_base = Cfg().summarizer.cover.basename_pattern.format(**d)
+
+    nfo = _find_sidecar_dir(save_dir, nfo_base, '.nfo')
+    if not nfo:
+        # 没有现成 nfo：允许新建，但用配置里的名字，不要套用视频名，
+        # 否则媒体库可能把它当成"另一部影片"的附属文件。
+        nfo = os.path.join(save_dir, nfo_base + '.nfo')
+
+    fanart = _find_sidecar_dir(save_dir, fanart_base, '.jpg')
+    if not fanart:
+        # 封面可能存成 png；沿用同名的任何一种图片
+        for ext in ('.png', '.jpeg', '.webp'):
+            found = _find_sidecar_dir(save_dir, fanart_base, ext)
+            if found:
+                fanart = found
+                break
+    if not fanart:
+        fanart = os.path.join(save_dir, fanart_base + '.jpg')
+
+    poster = _find_sidecar_dir(save_dir, poster_base, '.jpg')
+    if not poster:
+        for ext in ('.png', '.jpeg', '.webp'):
+            found = _find_sidecar_dir(save_dir, poster_base, ext)
+            if found:
+                poster = found
+                break
+    if not poster:
+        poster = os.path.join(save_dir, poster_base + '.jpg')
+
+    movie.nfo_file = ''.join(c for c in nfo if c != '\n')
+    movie.fanart_file = ''.join(c for c in fanart if c != '\n')
+    movie.poster_file = ''.join(c for c in poster if c != '\n')
+    logger.info(f'原地更新: 沿用目录 {save_dir}，nfo={os.path.basename(movie.nfo_file)}')
 
 
 def _pattern_save_dir(movie, copyd):
@@ -662,7 +754,9 @@ def _planned_steps(movies=None):
     # 按番号获取模式只产出元数据，没有源文件可移动，因此不包含 move_files。
     # 只要有一部影片处于该模式就按该模式计算（两种模式不会混在一次运行里）。
     by_id = any(getattr(m, 'by_id_mode', False) for m in (movies or []))
-    if Cfg().summarizer.move_files and not by_id:
+    # 原地更新模式不移动文件，步骤里也不该出现它，否则前端进度条多一格
+    update_only = any(_is_update_only(m) for m in (movies or []))
+    if Cfg().summarizer.move_files and not by_id and not update_only:
         steps.append('move_files')
     return steps
 
@@ -794,7 +888,11 @@ def _process_movie(movie, index: int, total_movies: int, steps: List[str],
         # 覆盖整理：写新产物之前先把旧的整理目录挪进 .replaced/ 备份。
         # 必须在 makedirs / 下载封面之前——那些操作会往目标目录里写文件，
         # 一旦目录被当成"旧产物"整目录搬走，刚下载的东西就跟着进备份了。
-        backed_up = _backup_before_rewrite(movie)
+        #
+        # 原地更新模式**跳过**这一步：那正是用户想要的"保持原位置"，
+        # 把整个目录搬进备份等于破坏了它的核心诉求。
+        update_only = _is_update_only(movie)
+        backed_up = [] if update_only else _backup_before_rewrite(movie)
 
         # exist_ok：并行整理时多部影片可能同时落到并集目录下（父目录/女优目录相同）
         os.makedirs(movie.save_dir, exist_ok=True)
@@ -856,7 +954,10 @@ def _process_movie(movie, index: int, total_movies: int, steps: List[str],
         inner_bar.set_description('写入NFO')
         write_nfo(movie.info, movie.nfo_file)
         check_step(True, 'write_nfo')
-        if Cfg().summarizer.move_files and not getattr(movie, 'by_id_mode', False):
+        if update_only:
+            # 原地更新：文件与目录都不动，只把 nfo/封面重写过
+            logger.info(f'已原地更新（未移动文件）: {movie.nfo_file}\n')
+        elif Cfg().summarizer.move_files and not getattr(movie, 'by_id_mode', False):
             current_step = 'move_files'
             inner_bar.set_description('移动影片文件')
             movie.rename_files(Cfg().summarizer.path.hard_link)

@@ -15,7 +15,7 @@ import pytest
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from javsp.config import Cfg
-from javsp.datatype import Movie
+from javsp.datatype import Movie, MovieInfo
 from javsp.file import REPLACED_DIR_NAME, backup_existing_dir, scan_movies
 
 
@@ -240,3 +240,105 @@ def test_human_size_formatting():
     assert _human_size(0) == '0 B'
     assert _human_size(1024) == '1.0 KB'
     assert _human_size(5 * 1024 ** 3) == '5.0 GB'
+
+
+# --------------------------- 原地更新 --------------------------- #
+
+def _organized_movie(tmp_path, avid='ABP-647', nfo_name='movie.nfo'):
+    """造一部已整理好的影片：视频 + nfo + 封面都在同一个目录里"""
+    folder = tmp_path / '瀬名きらり' / f'[{avid}] 旧标题'
+    folder.mkdir(parents=True)
+    video = folder / f'{avid}.mp4'
+    video.write_bytes(b'v' * 10)
+    (folder / nfo_name).write_text('<movie><title>旧标题</title></movie>')
+    (folder / 'poster.jpg').write_bytes(b'p' * 10)
+    (folder / 'fanart.jpg').write_bytes(b'f' * 10)
+
+    movie = Movie(avid)
+    movie.files = [str(video)]
+    return movie, folder
+
+
+def test_is_update_only_requires_flag_and_files():
+    from javsp.__main__ import _is_update_only
+
+    movie = Movie('ABP-647')
+    movie.files = ['/x/ABP-647.mp4']
+    assert _is_update_only(movie) is False       # 没打标记
+
+    movie.update_only = True
+    assert _is_update_only(movie) is True
+
+    # 按番号获取模式没有源文件，不该走原地更新
+    movie.files = []
+    assert _is_update_only(movie) is False
+
+
+def test_generate_names_keeps_directory_and_nfo_in_place(tmp_path):
+    """核心诉求：目录不变、nfo 沿用原名，不按模板另造一套"""
+    from javsp.__main__ import generate_names
+
+    movie, folder = _organized_movie(tmp_path)
+    movie.update_only = True
+    movie.info = _fake_info()
+
+    generate_names(movie)
+
+    assert os.path.abspath(movie.save_dir) == os.path.abspath(str(folder))
+    assert movie.nfo_file == str(folder / 'movie.nfo')
+    # 视频文件名不允许被改写
+    assert movie.basename == 'ABP-647'
+
+
+def test_generate_names_in_place_preserves_video_named_nfo(tmp_path):
+    """目录里 nfo 叫 <视频名>.nfo 时也要沿用它，不能新建 movie.nfo"""
+    from javsp.__main__ import generate_names
+
+    movie, folder = _organized_movie(tmp_path, nfo_name='ABP-647.nfo')
+    movie.update_only = True
+    movie.info = _fake_info()
+
+    generate_names(movie)
+
+    assert movie.nfo_file == str(folder / 'ABP-647.nfo')
+
+
+def test_generate_names_in_place_keeps_existing_image_names(tmp_path):
+    from javsp.__main__ import generate_names
+
+    movie, folder = _organized_movie(tmp_path)
+    movie.update_only = True
+    movie.info = _fake_info()
+
+    generate_names(movie)
+
+    assert movie.fanart_file == str(folder / 'fanart.jpg')
+    assert movie.poster_file == str(folder / 'poster.jpg')
+
+
+def test_planned_steps_excludes_move_files_when_update_only():
+    from javsp.__main__ import _planned_steps
+
+    movie = Movie('ABP-647')
+    movie.files = ['/x/ABP-647.mp4']
+    movie.update_only = True
+    steps = _planned_steps([movie])
+    assert 'move_files' not in steps
+    assert 'write_nfo' in steps
+
+
+def test_planned_steps_includes_move_files_without_update_only():
+    from javsp.__main__ import _planned_steps
+
+    movie = Movie('ABP-647')
+    movie.files = ['/x/ABP-647.mp4']
+    assert 'move_files' in _planned_steps([movie])
+
+
+def _fake_info():
+    """最小可用的 MovieInfo（generate_names 只用到这几个字段）"""
+    info = MovieInfo(from_file=os.path.join(
+        os.path.dirname(__file__), 'data', 'ABP-647 (airav).json'))
+    info.dvdid = 'ABP-647'
+    info.actress = ['瀬名きらり']
+    return info

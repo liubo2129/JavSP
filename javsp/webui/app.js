@@ -86,6 +86,7 @@
     idsInput: $('ids-input'), idHint: $('id-hint'),
     chkIncludeScraped: $('chk-include-scraped'),
     chkIncludeScrapedId: $('chk-include-scraped-id'),
+    chkUpdateOnly: $('chk-update-only'),
     lightbox: $('lightbox'), lbImg: $('lb-img'), lbClose: $('lb-close'),
     lbPrev: $('lb-prev'), lbNext: $('lb-next'), lbCounter: $('lb-counter'),
     brand: $('brand'), settings: $('settings'), settingsBody: $('settings-body'),
@@ -1007,10 +1008,15 @@
     }
     if (!state.directory) return;
     pushRecent(state.directory);
+    const updateOnly = !!el.chkUpdateOnly.checked;
     const res = await api('/api/start', {
       directory: state.directory,
       include_scraped: !!el.chkIncludeScraped.checked,
+      update_only: updateOnly,
     });
+    if (res.ok && updateOnly) {
+      pushLog('原地更新模式：只重写 nfo 与图片，不移动文件', 'ok');
+    }
     if (!res.ok) {
       const msg = res.message || res.error || '';
       pushLog('无法开始: ' + msg, 'err');

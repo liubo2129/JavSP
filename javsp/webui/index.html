@@ -163,6 +163,19 @@
           </span>
         </label>
 
+        <!-- 原地更新：只重写 nfo 与图片，不移动文件、不改目录名 -->
+        <label class="check-row" id="row-update-only">
+          <input type="checkbox" id="chk-update-only">
+          <span class="check-box" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"
+                 stroke-linecap="round" stroke-linejoin="round"><path d="M4.5 12.5l5 5 10-10"/></svg>
+          </span>
+          <span class="check-text">
+            <span class="check-title">仅更新 NFO（不移动文件）</span>
+            <span class="check-note">影片与目录保持原位，只重写 nfo、封面与海报；建议同时勾选上面的「包含已整理」</span>
+          </span>
+        </label>
+
         <div class="recent hidden" id="recent">
           <span class="recent-label">最近</span>
           <div class="recent-items" id="recent-items"></div>

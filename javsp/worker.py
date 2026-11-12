@@ -63,6 +63,29 @@ def include_scraped_requested() -> bool:
     """本次运行是否要扫描已整理的文件夹"""
     return os.environ.get(INCLUDE_SCRAPED_ENV_FLAG) == '1'
 
+
+# 置为 '1' 时进入"原地更新"模式：只重写 nfo 与封面/海报，
+# 不移动影片文件、也不改目录名。
+UPDATE_ONLY_ENV_FLAG = 'JAVSP_UPDATE_ONLY'
+
+
+def update_only_requested() -> bool:
+    """本次运行是否为原地更新模式"""
+    return os.environ.get(UPDATE_ONLY_ENV_FLAG) == '1'
+
+
+def _apply_update_only(movies) -> None:
+    """把原地更新标记打到每部影片上
+
+    必须排在 ``RunNormalMode`` 之前：``generate_names`` 与管线都靠
+    ``movie.update_only`` 决定走哪条分支，晚设置就等于没设置。
+    """
+    if not update_only_requested():
+        return
+    for movie in movies:
+        movie.update_only = True
+    logger.info('本次为原地更新模式：只重写 nfo 与图片，不移动文件')
+
 # 输入番号时可能用到的分隔符（含中文标点）
 _ID_SEPARATORS = re.compile(r'[\s,，;；、|/]+')
 
@@ -313,6 +336,7 @@ def _run(root: str, sink) -> int:
         return 1
 
     sink(EventKind.RUN_STARTED, movie_count=len(recognized), root=root)
+    _apply_update_only(recognized)
     finished = RunNormalMode(recognized, sink=sink)
     sink(EventKind.RUN_FINISHED,
          movie_count=len(recognized),

@@ -217,11 +217,13 @@ class _Handler(BaseHTTPRequestHandler):
         elif route == '/api/start':
             directory = (body.get('directory') or '').strip()
             self._send_json(self.state.start_scrape(
-                directory, include_scraped=bool(body.get('include_scraped'))))
+                directory, include_scraped=bool(body.get('include_scraped')),
+                update_only=bool(body.get('update_only'))))
         elif route == '/api/start_by_id':
             self._send_json(self.state.start_by_id(
                 body.get('folder') or '', body.get('ids') or '',
-                include_scraped=bool(body.get('include_scraped'))))
+                include_scraped=bool(body.get('include_scraped')),
+                update_only=bool(body.get('update_only'))))
         elif route == '/api/settings/crawler_selection':
             self._send_json(self.state.update_crawler_selection(
                 body.get('selection') or {}))
@@ -917,7 +919,8 @@ class GuiServer:
         return cmd
 
     def _spawn(self, directory: str, mode: str, ids: str = '',
-               include_scraped: bool = False) -> Dict[str, Any]:
+               include_scraped: bool = False,
+               update_only: bool = False) -> Dict[str, Any]:
         with self._lock:
             if self._is_running_locked():
                 return {'ok': False, 'error': 'busy',
@@ -951,6 +954,12 @@ class GuiServer:
                 env['JAVSP_INCLUDE_SCRAPED'] = '1'
             else:
                 env.pop('JAVSP_INCLUDE_SCRAPED', None)
+            # 原地更新：只重写 nfo 与封面，不移动文件、不改目录名。
+            # 只对 scrape/by_id 有意义，scan 阶段无所谓。
+            if update_only and mode != 'scan':
+                env['JAVSP_UPDATE_ONLY'] = '1'
+            else:
+                env.pop('JAVSP_UPDATE_ONLY', None)
             # 从源码运行时需要让子进程能找到 javsp 包
             if not getattr(sys, 'frozen', False):
                 root = str(Path(__file__).resolve().parent.parent)
@@ -1232,7 +1241,8 @@ class GuiServer:
         }
 
     def start_by_id(self, folder: str, ids_text: str,
-                    include_scraped: bool = False) -> Dict[str, Any]:
+                    include_scraped: bool = False,
+                    update_only: bool = False) -> Dict[str, Any]:
         """按番号获取元数据
 
         与"按目录"不同：不扫描任何目录，直接按给定番号抓取，
@@ -1268,7 +1278,8 @@ class GuiServer:
 
         self._remember_directory(folder)
         return self._spawn(folder, 'by_id', ids='\n'.join(ids),
-                           include_scraped=include_scraped)
+                           include_scraped=include_scraped,
+                           update_only=update_only)
 
     def _remember_directory(self, directory: str) -> None:
         """记住本次任务使用的目录
@@ -1280,13 +1291,15 @@ class GuiServer:
             self._directory = os.path.abspath(directory)
         self._emit('gui.directory_changed', directory=self._directory)
 
-    def start_scrape(self, directory: str, include_scraped: bool = False) -> Dict[str, Any]:
+    def start_scrape(self, directory: str, include_scraped: bool = False,
+                     update_only: bool = False) -> Dict[str, Any]:
         check = _validate_directory(directory)
         if check is not None:
             return check
         self._remember_directory(directory)
         return self._spawn(os.path.abspath(directory), 'scrape',
-                           include_scraped=include_scraped)
+                           include_scraped=include_scraped,
+                           update_only=update_only)
 
     def _read_events(self, proc: subprocess.Popen) -> None:
         """逐行解析 worker 的 NDJSON 事件并广播"""
