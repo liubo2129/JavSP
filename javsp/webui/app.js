@@ -751,6 +751,14 @@
           m.step = p.step;
           m.stepIndex = p.step_index;
           m.stepTotal = p.step_total;
+          // status 目前有两种：'ok' 与 'partial'（剧照有个别失败但影片继续）。
+          // 记下来供提示用，但不改变影片的运行状态——部分失败不等于失败。
+          if (p.status === 'partial') {
+            m.partial = { step: p.step, failed: p.failed, total: p.total };
+            pushLog(
+              `${p.movie_id} · ${STEP_LABELS[p.step] || p.step}：` +
+              `${p.failed}/${p.total} 张失败（已跳过，不影响整理）`, 'warn');
+          }
         }
         break;
       }

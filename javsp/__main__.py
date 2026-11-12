@@ -761,6 +761,22 @@ def _planned_steps(movies=None):
     return steps
 
 
+def _discard_broken_file(path: str) -> None:
+    """删掉刚下载但内容无效的文件
+
+    站点在图片地址失效时常常返回 HTML 错误页且状态码是 200，``download()``
+    会正常落盘，只有 ``valid_pic()`` 才发现解码失败。留着这个文件比没有更糟：
+    Kodi/Emby 会把它当成一张剧照，界面里表现为空白格子。
+
+    只删调用方明确传进来的单个文件，不做任何目录级删除。
+    """
+    try:
+        if path and os.path.isfile(path):
+            os.remove(path)
+    except OSError as e:
+        logger.debug(f'无法删除无效文件: {path}: {e}')
+
+
 def _backup_anchor(movie) -> str | None:
     """重新整理时旧目录备份到哪个目录下
 
@@ -928,6 +944,7 @@ def _process_movie(movie, index: int, total_movies: int, steps: List[str],
                 # 用 exist_ok 而非裸 mkdir：不移动文件时同一目录会被多部影片共用，
                 # 裸 mkdir 会让第二部影片抛 FileExistsError 并中断整个运行
                 os.makedirs(extrafanartdir, exist_ok=True)
+                failed_pics = []
                 for (id, pic_url) in enumerate(movie.info.preview_pics):
                     inner_bar.set_description(f"Downloading extrafanart {id} from url: {pic_url}")
                     fanart_destination = os.path.join(extrafanartdir, f'{id}.png')
@@ -940,15 +957,36 @@ def _process_movie(movie, index: int, total_movies: int, steps: List[str],
                             speed = get_fmt_size(info['rate']) + '/s'
                             logger.info(f"已下载剧照{pic_url} {id}.png: {width}x{height}, {filesize} [{elapsed}, {speed}]")
                         else:
-                            logger.warning(f'剧照下载后校验失败（文件可能被截断）: {pic_url}')
-                            check_step(False, 'extrafanart', f"下载剧照{id}: {pic_url}失败")
+                            # 站点常见行为：图片地址失效时返回 HTML 错误页（HTTP 200），
+                            # download 不抛异常，只有解码才会发现。留下这个文件会让
+                            # 媒体库/界面把它当真图展示（空白格子），所以必须删掉。
+                            logger.warning(f'剧照不是有效图片（站点可能返回了错误页）: {pic_url}')
+                            _discard_broken_file(fanart_destination)
+                            failed_pics.append((id, pic_url))
                     except Exception as e:
                         # 必须记录真实原因：并行整理时同时下载多部影片的剧照，
                         # 限流/超时会更常见，只报"失败"没法排查。
                         logger.warning(f'下载剧照失败: {pic_url}: {type(e).__name__}: {e}')
-                        check_step(False, 'extrafanart', f"下载剧照{id}: {pic_url}失败")
+                        _discard_broken_file(fanart_destination)
+                        failed_pics.append((id, pic_url))
                     time.sleep(scrape_interval)
-            check_step(True, 'extrafanart')
+
+                # 单张剧照失败不再否决整部影片。剧照不属于 crawler.required_keys，
+                # 是"锦上添花"的资源；如果让它抛异常中断，会因为一个失效的图片
+                # 链接导致这部影片连 nfo 都写不出来（元数据其实早已抓齐）。
+                total_pics = len(movie.info.preview_pics)
+                if failed_pics:
+                    logger.warning(
+                        f'剧照下载完成，{len(failed_pics)}/{total_pics} 张失败（不影响影片整理）: '
+                        + ', '.join(f'{i}: {u}' for i, u in failed_pics[:5])
+                        + (' ...' if len(failed_pics) > 5 else ''))
+                    sink(EventKind.MOVIE_STEP, step='extrafanart',
+                         step_index=steps.index('extrafanart') + 1, step_total=total_step,
+                         status='partial', failed=len(failed_pics), total=total_pics)
+                else:
+                    check_step(True, 'extrafanart')
+            else:
+                check_step(True, 'extrafanart')
 
         current_step = 'write_nfo'
         inner_bar.set_description('写入NFO')
