@@ -200,9 +200,15 @@ class Movie:
                 move_file(fullpath, newpath)
                 new_paths.append(newpath)
         self.new_paths = new_paths
-        if len(os.listdir(dir)) == 0:
-            #如果移动文件后目录为空则删除该目录
-            os.rmdir(dir)
+        # 如果移动文件后目录为空则删除该目录。
+        # 并行整理时同一源目录可能正被另一部影片的文件占用：判断与删除之间
+        # 状态会变，必须用 try 兜住，否则 FileNotFoundError/OSError 会把
+        # 一部已经整理成功的影片误判为失败。
+        try:
+            if len(os.listdir(dir)) == 0:
+                os.rmdir(dir)
+        except OSError as e:
+            logger.debug(f"无法删除已空的源目录: '{dir}': {e}")
 
 
 class GenreMap(dict):

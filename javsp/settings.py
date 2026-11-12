@@ -208,6 +208,65 @@ def normalize_selection(selection: Dict[str, Any]) -> Dict[str, List[str]]:
     return {group: to_enabled(selection.get(group)) for group in GROUP_KEYS}
 
 
+# 并发数的允许范围。上限取 8：再多对目标站点和磁盘都太难看了，
+# 而且真到那个量级应该换更严格的限流方案而不是继续加线程。
+MAX_WORKERS_LIMIT = 8
+
+
+def load_max_workers(default: int = 1) -> int:
+    """读取用户保存的并发数；未保存或非法时回落到 default"""
+    raw = load_settings().get('max_workers')
+    return normalize_max_workers(raw, default)
+
+
+def has_saved_max_workers() -> bool:
+    """用户是否显式保存过并发数
+
+    与"当前生效的并发数是多少"是两件事：没有保存记录时要完整沿用
+    config.yml，连 settings.applied 事件也不该发。
+    """
+    return 'max_workers' in load_settings()
+
+
+def normalize_max_workers(value: Any, default: int = 1) -> int:
+    """把任意输入规范成 1..MAX_WORKERS_LIMIT 的整数"""
+    if value is None or value == '':
+        return default
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return default
+    return max(1, min(MAX_WORKERS_LIMIT, number))
+
+
+def save_max_workers(value: Any, path: Optional[Path] = None) -> int:
+    """保存并发数（只写这一个键），返回规范化后的值"""
+    normalized = normalize_max_workers(value)
+    settings = load_settings(path)
+    settings['max_workers'] = normalized
+    save_settings(settings, path)
+    return normalized
+
+
+def apply_saved_max_workers(cfg: Any = None) -> int:
+    """把用户保存的并发数应用到 ``Cfg().crawler.max_workers``
+
+    与 ``merge_into_config`` 同理：confz 的配置模型是 frozen 的，需要
+    自内向外重建再挂回去。没有保存过时保持 config.yml 的值不动。
+    """
+    from javsp.config import Cfg
+
+    raw = load_settings().get('max_workers')
+    if raw is None:
+        cfg = cfg or Cfg()
+        return int(cfg.crawler.max_workers)
+    cfg = cfg or Cfg()
+    value = normalize_max_workers(raw, int(cfg.crawler.max_workers))
+    new_crawler = cfg.crawler.model_copy(update={'max_workers': value})
+    object.__setattr__(cfg, 'crawler', new_crawler)
+    return value
+
+
 def merge_into_config(cfg_selection: Any,
                       enabled_by_group: Dict[str, Iterable[str]]) -> None:
     """把启用的站点写回 ``Cfg().crawler.selection``

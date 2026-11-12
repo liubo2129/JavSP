@@ -19,6 +19,7 @@ import json
 import logging
 import os
 import secrets
+import shutil
 import signal
 import socket
 import subprocess
@@ -40,6 +41,10 @@ logger = logging.getLogger(__name__)
 
 # 事件历史保留条数：用于页面刷新/后连接时补齐上下文
 EVENT_HISTORY_SIZE = 500
+
+# 快照里回放历史的下限条数。正常情况下会从最近的 run.started 开始给，
+# 只有拿不到 run.started 时才退回到这个数量。
+SNAPSHOT_MIN_EVENTS = 120
 
 # 会话 token 的 Cookie 名。用于让 webview 的相对路径子资源请求（CSS/JS）
 # 也能通过鉴权——它们不会携带主页面的 query string。
@@ -606,14 +611,35 @@ class GuiServer:
     # ---------- 状态 ----------
 
     def snapshot(self) -> Dict[str, Any]:
+        """当前状态快照（前端刷新后靠它重建界面）
+
+        ``recent`` 必须给出**整轮任务完整**的事件序列，不能只截最后 N 条：
+        前端是按增量语义回放这段历史的（movie.started 建卡片、
+        movie.finished 累加计数），丢了开头的 run.started / movie.started
+        会让刷新后的界面显示成"0 / 0、没有任何影片"。
+
+        并行整理（crawler.max_workers > 1）会让事件量成倍增长，原来固定
+        截 120 条很容易把开头截掉，因此这里改为从最近一条 run.started
+        开始取，并保留一个下限保证没有 run 事件时也有内容可回放。
+        """
         with self._lock:
+            items = list(self._history)
+            start = 0
+            for i in range(len(items) - 1, -1, -1):
+                if items[i].get('kind') == 'run.started':
+                    start = i
+                    break
+            else:
+                # 本轮没有 run.started（被挤出环形缓冲，或还没开始）：
+                # 至少给足一段历史，避免界面空白
+                start = max(0, len(items) - SNAPSHOT_MIN_EVENTS)
             return {
                 'token': self.token,
                 'mode': self._mode,
                 'directory': self._directory,
                 'running': self._is_running_locked(),
                 'last_exit': self._last_exit,
-                'recent': list(self._history)[-120:],
+                'recent': items[start:],
             }
 
     def _is_running_locked(self) -> bool:
@@ -928,8 +954,9 @@ class GuiServer:
         避免两处清单再次漂移——历史上 config.yml 就漏配过 5 个抓取器。
         """
         from javsp.settings import (
-            GROUP_LABELS, all_crawlers_by_group, default_enabled_by_group,
-            load_crawler_selection, settings_path,
+            GROUP_LABELS, MAX_WORKERS_LIMIT, all_crawlers_by_group,
+            default_enabled_by_group, load_crawler_selection, load_max_workers,
+            settings_path,
         )
 
         saved = load_crawler_selection()
@@ -967,6 +994,9 @@ class GuiServer:
             'ok': True,
             'groups': groups,
             'defaults': defaults,
+            # 并发数：用户保存过就用保存值，否则回落到 config.yml 的当前值
+            'max_workers': load_max_workers(int(Cfg().crawler.max_workers)),
+            'max_workers_limit': MAX_WORKERS_LIMIT,
             'settings_file': str(settings_path()),
         }
 

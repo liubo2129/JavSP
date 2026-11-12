@@ -117,6 +117,10 @@ class Crawler(BaseConfig):
     sleep_after_scraping: Duration
     use_javdb_cover: UseJavDBCover
     normalize_actress_name: bool
+    # 同时整理的影片数量。1 = 串行（既有行为），>1 时多部影片并行跑完整管线。
+    # 同一部影片的各个站点本来就是并行的，这个选项控制的是影片之间的并发。
+    # 给默认值是为了兼容没有该键的旧配置文件。
+    max_workers: PositiveInt = 1
 
 class MovieDefault(BaseConfig):
     title: str

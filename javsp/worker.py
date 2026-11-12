@@ -242,16 +242,25 @@ def _apply_user_settings(sink) -> None:
     """
     from javsp.config import Cfg
     from javsp.events import EventKind
-    from javsp.settings import load_crawler_selection, merge_into_config
+    from javsp.settings import (
+        apply_saved_max_workers, has_saved_max_workers, load_crawler_selection,
+        merge_into_config,
+    )
 
     saved = load_crawler_selection()
-    if not saved:
-        # 用户没动过设置，完整走 config.yml 的出厂配置
-        return
-    merge_into_config(Cfg().crawler.selection, saved)
-    logger.info('已应用用户设置的抓取器开关: %s',
-                ', '.join(f'{g}={len(v)}' for g, v in saved.items()))
-    sink(EventKind.SETTINGS_APPLIED, crawler_selection=saved)
+    if saved:
+        merge_into_config(Cfg().crawler.selection, saved)
+        logger.info('已应用用户设置的抓取器开关: %s',
+                    ', '.join(f'{g}={len(v)}' for g, v in saved.items()))
+        sink(EventKind.SETTINGS_APPLIED, crawler_selection=saved)
+
+    # 并发数独立于抓取器开关：即使没改过站点，用户也可能单独调过它。
+    # 只有用户**确实保存过**这个键才上报事件，否则"没动过设置"的运行
+    # 也会冒出一条 settings.applied，与既有约定不符。
+    if has_saved_max_workers():
+        workers = apply_saved_max_workers()
+        logger.info('已应用用户设置的并发数: %d', workers)
+        sink(EventKind.SETTINGS_APPLIED, max_workers=workers)
 
 
 def _run(root: str, sink) -> int:

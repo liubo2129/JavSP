@@ -2,6 +2,7 @@
 import os
 import re
 import logging
+import threading
 
 from javsp.web.base import Request, is_usable, resp2html
 from javsp.web.exceptions import *
@@ -25,6 +26,11 @@ else:
     base_url = str(Cfg().network.proxy_free[CrawlerID.javdb]).rstrip('/')
 
 _base_url_checked = False
+# 并行整理时多部影片会同时进入 check_base_url，用锁保证只探测一次，
+# 也避免一个线程刚把 base_url 改回永久域名、另一个线程又依据旧值覆盖回去。
+_check_lock = threading.Lock()
+# Cookies 池是模块级共享状态，并行整理时会被多个抓取线程同时消费
+_cookies_lock = threading.Lock()
 
 
 def check_base_url():
@@ -37,11 +43,15 @@ def check_base_url():
     global base_url, _base_url_checked
     if _base_url_checked or Cfg().network.proxy_server is not None or base_url == permanent_url:
         return
-    _base_url_checked = True
-    if is_usable(base_url):
-        return
-    logger.warning(f'JavDB免代理地址不可用（可能已过期或被域名停放）: {base_url}，改用 {permanent_url}')
-    base_url = permanent_url
+    with _check_lock:
+        # 锁内复查：等待锁期间可能已有别的线程完成探测
+        if _base_url_checked:
+            return
+        _base_url_checked = True
+        if is_usable(base_url):
+            return
+        logger.warning(f'JavDB免代理地址不可用（可能已过期或被域名停放）: {base_url}，改用 {permanent_url}')
+        base_url = permanent_url
 
 
 def get_html_wrapper(url):
@@ -51,26 +61,32 @@ def get_html_wrapper(url):
     if r.status_code == 200:
         # 发生重定向可能仅仅是域名重定向，因此还要检查url以判断是否被跳转到了登录页
         if r.history and '/login' in r.url:
-            # 仅在需要时去读取Cookies
-            if 'cookies_pool' not in globals():
-                try:
-                    cookies_pool = get_browsers_cookies()
-                except (PermissionError, OSError) as e:
-                    logger.warning(f"无法从浏览器Cookies文件获取JavDB的登录凭据({e})，可能是安全软件在保护浏览器Cookies文件", exc_info=True)
-                    cookies_pool = []
-                except Exception as e:
-                    logger.warning(f"获取JavDB的登录凭据时出错({e})，你可能使用的是国内定制版等非官方Chrome系浏览器", exc_info=True)
-                    cookies_pool = []
-            if len(cookies_pool) > 0:
-                item = cookies_pool.pop()
-                # 更换Cookies时需要创建新的request实例，否则cloudscraper会保留它内部第一次发起网络访问时获得的Cookies
-                request = Request(use_scraper=True)
-                request.cookies = item['cookies']
-                cookies_source = (item['profile'], item['site'])
+            # 仅在需要时去读取Cookies。并行抓取时多个线程可能同时走到这里，
+            # 用锁把"初始化池 + 取一个 + 重建 request"做成原子操作：
+            # 否则两个线程会对同一个 cookies 各重建一次 request，或先后 pop
+            # 到同一批凭据而互相覆盖 request.cookies。
+            with _cookies_lock:
+                if 'cookies_pool' not in globals():
+                    try:
+                        cookies_pool = get_browsers_cookies()
+                    except (PermissionError, OSError) as e:
+                        logger.warning(f"无法从浏览器Cookies文件获取JavDB的登录凭据({e})，可能是安全软件在保护浏览器Cookies文件", exc_info=True)
+                        cookies_pool = []
+                    except Exception as e:
+                        logger.warning(f"获取JavDB的登录凭据时出错({e})，你可能使用的是国内定制版等非官方Chrome系浏览器", exc_info=True)
+                        cookies_pool = []
+                if len(cookies_pool) > 0:
+                    item = cookies_pool.pop()
+                    # 更换Cookies时需要创建新的request实例，否则cloudscraper会保留它内部第一次发起网络访问时获得的Cookies
+                    request = Request(use_scraper=True)
+                    request.cookies = item['cookies']
+                    cookies_source = (item['profile'], item['site'])
+                else:
+                    cookies_source = None
+            if cookies_source is not None:
                 logger.debug(f'未携带有效Cookies而发生重定向，尝试更换Cookies为: {cookies_source}')
                 return get_html_wrapper(url)
-            else:
-                raise CredentialError('JavDB: 所有浏览器Cookies均已过期')
+            raise CredentialError('JavDB: 所有浏览器Cookies均已过期')
         elif r.history and 'pay' in r.url.split('/')[-1]:
             raise SitePermissionError(f"JavDB: 此资源被限制为仅VIP可见: '{r.history[0].url}'")
         else:

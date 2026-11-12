@@ -158,6 +158,22 @@
         <div class="crawler-list">${items}</div>
       </section>`);
     }
+    // 并发数：放在站点分组之前，它是整轮任务的运行参数，不是站点开关
+    const limit = data.max_workers_limit || 8;
+    const workers = settings.maxWorkers || 1;
+    parts.unshift(`<section class="crawler-group" data-group="__concurrency">
+      <div class="crawler-group-head">
+        <h3>同时整理的影片数<span class="group-note">1 = 逐部串行</span></h3>
+      </div>
+      <div class="concurrency-row">
+        <input class="concurrency-range" id="settings-workers" type="range"
+               min="1" max="${limit}" step="1" value="${workers}"
+               aria-label="同时整理的影片数">
+        <output class="concurrency-value" id="settings-workers-value">${workers} 部</output>
+      </div>
+      <p class="concurrency-note">调大可以更快，但同时对多个站点发请求更容易被限流；
+        同一部影片的各个站点本来就是并行抓取的。</p>
+    </section>`);
     el.settingsBody.innerHTML = parts.join('');
   }
 
@@ -197,11 +213,16 @@
     el.settingsHint.classList.remove('err');
     el.settingsHint.textContent = '正在保存…';
     try {
+      // 两个接口分开存：站点开关与并发数各自只写自己的键，互不覆盖
       const res = await api('/api/settings/crawler_selection', { selection });
       if (!res.ok) throw new Error(res.message || res.error || '保存失败');
+      const conc = await api('/api/settings/concurrency', {
+        max_workers: settings.maxWorkers || 1,
+      });
+      if (!conc.ok) throw new Error(conc.message || conc.error || '保存并发数失败');
       settings.dirty = false;
       el.settingsHint.textContent = res.message || '已保存';
-      pushLog('设置已保存：抓取站点已更新（下次任务生效）', 'ok');
+      pushLog('设置已保存：抓取站点与并发数已更新（下次任务生效）', 'ok');
       toast('设置已保存，将在下一次任务生效', 'ok');
       closeSettings();
     } catch (e) {
@@ -218,6 +239,7 @@
     for (const g of settings.data.groups) {
       settings.selection[g.key] = new Set(defaults[g.key] || []);
     }
+    settings.maxWorkers = 1;
     settings.dirty = true;
     renderSettings();
     el.settingsHint.classList.remove('err');
@@ -295,10 +317,19 @@
         ? '正在扫描 ' + shortPath(state.scan.currentDir)
         : '正在扫描…';
     } else if (job === 'scrape') {
-      const active = [...state.movies.values()].find((m) => m.status === 'active');
-      el.jobHint.textContent = active
-        ? `正在处理 ${active.id}${active.step ? ' · ' + (STEP_LABELS[active.step] || active.step) : ''}`
-        : '正在处理…';
+      // 并行整理时可能同时有多部在跑，只报"第一个"会让人以为卡住了
+      const actives = [...state.movies.values()].filter((m) => m.status === 'active');
+      if (actives.length === 0) {
+        el.jobHint.textContent = '正在处理…';
+      } else if (actives.length === 1) {
+        const a = actives[0];
+        el.jobHint.textContent =
+          `正在处理 ${a.id}${a.step ? ' · ' + (STEP_LABELS[a.step] || a.step) : ''}`;
+      } else {
+        const ids = actives.slice(0, 3).map((m) => m.id).join('、');
+        const more = actives.length > 3 ? ` 等 ${actives.length} 部` : '';
+        el.jobHint.textContent = `并行处理中：${ids}${more}`;
+      }
     } else if (job === 'done') {
       el.jobHint.textContent = `全部完成，共 ${state.finished} 部`;
     } else if (job === 'failed') {
@@ -828,12 +859,10 @@
 
   function handleCrawler(kind, p) {
     const key = p.movie_id;
-    let m = key ? state.movies.get(key) : null;
-    if (!m) {
-      for (const cand of state.movies.values()) {
-        if (cand.status === 'active') { m = cand; break; }
-      }
-    }
+    // 只在事件确实携带 movie_id 时按 id 归位。并行整理会同时有多部影片处于
+    // active，此时"退回到第一个 active"必然串号（站点结果会算到别的影片头上），
+    // 所以带 id 但查不到时宁可丢弃，也不要猜。
+    const m = key ? state.movies.get(key) : null;
     if (!m || !p.crawler) return;
     if (kind === 'crawler.succeeded') m.sites.set(p.crawler, 'ok');
     else if (kind === 'crawler.failed') m.sites.set(p.crawler, 'err');
@@ -1001,6 +1030,19 @@
     if (input.checked) set.add(id); else set.delete(id);
     settings.selection[group] = set;
     settings.dirty = true;
+    el.settingsHint.classList.remove('err');
+    el.settingsHint.textContent = '有未保存的改动';
+  });
+
+  // 并发数滑块：拖动时实时回显，保存时才落盘
+  el.settingsBody.addEventListener('input', (e) => {
+    const range = e.target.closest('#settings-workers');
+    if (!range) return;
+    const value = parseInt(range.value, 10) || 1;
+    settings.maxWorkers = value;
+    settings.dirty = true;
+    const out = $('settings-workers-value');
+    if (out) out.textContent = `${value} 部`;
     el.settingsHint.classList.remove('err');
     el.settingsHint.textContent = '有未保存的改动';
   });
