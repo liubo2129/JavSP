@@ -5,7 +5,40 @@ import sys
 from pathlib import Path
 
 
-__all__ = ['re_escape', 'resource_path', 'strftime_to_minutes', 'detect_special_attr']
+__all__ = ['re_escape', 'resource_path', 'strftime_to_minutes', 'detect_special_attr',
+           'is_metadata_name', 'METADATA_BASENAMES']
+
+
+# 各平台系统自动生成的目录级元数据文件（大小写不敏感）
+METADATA_BASENAMES = frozenset({
+    '.ds_store', 'thumbs.db', 'desktop.ini', 'ehthumbs.db',
+})
+
+
+def is_metadata_name(name: str) -> bool:
+    """文件名是否是文件系统/系统软件产生的元数据文件，而非真实内容
+
+    macOS 在**非 APFS 卷**（exFAT / FAT / SMB / NAS）上会为每个文件额外写一个
+    AppleDouble 伴随文件，名字是 ``._<原名>``，内容以 ``Mac OS X`` 开头、
+    通常恰好 4096 字节。它**保留了原扩展名**，因此只靠扩展名判断会把它当成
+    真图片/真视频：
+
+    * 剧照列表混进一堆"有路径但解码失败"的条目，界面显示为空白
+      （前端 onerror 会移除 src，既不是破图也不是占位，就是一片空）
+    * 扫描时被当成影片文件，虚增 video_count，甚至产出"无法识别番号"的
+      假失败项
+
+    ``.DS_Store`` / ``Thumbs.db`` / ``desktop.ini`` 同理，既不是影片也不是图片。
+
+    该函数放在 lib.py 而不是 file.py：``file.py``（扫描）与 ``server.py``
+    （图库/图片接口）都要用，而 server 依赖 file 会造成循环导入。
+    """
+    if not name:
+        return True
+    # AppleDouble：._foo.png。只看前缀，不看后缀——它刻意保留了原扩展名
+    if name.startswith('._'):
+        return True
+    return name.lower() in METADATA_BASENAMES
 
 
 _special_chars_map = {i: '\\' + chr(i) for i in b'()[]{}?*+|^$\\.'}

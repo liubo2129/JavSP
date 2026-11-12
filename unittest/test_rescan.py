@@ -387,3 +387,34 @@ def test_update_only_scan_finds_nested_organized_movie(tmp_path, monkeypatch, bi
     # 仅更新 NFO 时合并出 include_scraped=True，必须能扫到
     found = scan_movies(str(tmp_path), include_scraped=True)
     assert [m.dvdid for m in found] == ['ABP-647']
+
+
+# ------------- AppleDouble 陪伴文件不能被当成影片 ------------- #
+
+def test_scan_ignores_apple_double_video_files(tmp_path, big_files_only):
+    """._ABP-647.mp4 是 macOS 生成的元数据文件，不是影片
+
+    它保留 .mp4 扩展名，会被当成视频去解析番号，虚增 video_count，
+    甚至产出"无法识别番号"的假失败项。
+    """
+    from javsp.file import scan_movies
+
+    (tmp_path / 'ABP-647.mp4').write_bytes(b'x')
+    (tmp_path / '._ABP-647.mp4').write_bytes(b'\x00\x05\x16\x07' + b'\x00' * 4088)
+
+    movies = scan_movies(str(tmp_path))
+
+    assert [m.dvdid for m in movies] == ['ABP-647']
+    # 幽灵文件不能让同一番号看起来像"多分片"
+    assert movies[0].files == [str(tmp_path / 'ABP-647.mp4')]
+
+
+def test_scan_does_not_report_apple_double_as_unrecognized(tmp_path, big_files_only):
+    """只有幽灵文件、没有真影片时，不该产出"无法识别番号"的失败项"""
+    from javsp.file import failed_items, scan_movies
+
+    failed_items.clear()
+    (tmp_path / '._random-name.mp4').write_bytes(b'\x00\x05\x16\x07' + b'\x00' * 4088)
+
+    assert scan_movies(str(tmp_path)) == []
+    assert failed_items == []

@@ -100,3 +100,43 @@ def test_image_kind(name, expected):
 ])
 def test_numeric_prefix(stem, expected):
     assert _numeric_prefix(stem) == expected
+
+
+# ---------------- 系统元数据文件（AppleDouble 等）必须被过滤 ---------------- #
+
+def test_apple_double_files_are_excluded_from_stills(tmp_path):
+    """._0.png 是 macOS 在非 APFS 卷上生成的伴随文件，不是真剧照
+
+    它保留了 .png 扩展名、内容是 AppleDouble 头，解码必然失败。
+    混进列表就会让界面出现"有缩略图框但一片空白"的条目。
+    """
+    for i in range(3):
+        _img(tmp_path / 'extrafanart' / f'{i}.png')
+        # 同名 AppleDouble 伴随文件（真实场景里恰好 4096 字节）
+        (tmp_path / 'extrafanart' / f'._{i}.png').write_bytes(b'\x00\x05\x16\x07' + b'\x00' * 4088)
+
+    g = _collect_gallery(tmp_path, 'ABP-647')
+
+    assert len(g['stills']) == 3
+    assert not any(Path(p).name.startswith('._') for p in g['stills'])
+
+
+def test_apple_double_files_are_excluded_from_root_images(tmp_path):
+    """根目录下的 ._poster.jpg 同样不能冒充海报"""
+    _img(tmp_path / 'poster.jpg')
+    (tmp_path / '._poster.jpg').write_bytes(b'\x00\x05\x16\x07' + b'\x00' * 4088)
+
+    g = _collect_gallery(tmp_path, 'ABP-647')
+
+    assert Path(g['poster']).name == 'poster.jpg'
+    assert not any(Path(p).name.startswith('._') for p in g['other'])
+
+
+def test_is_metadata_name_flags_known_system_files():
+    from javsp.lib import is_metadata_name
+
+    for name in ('._0.png', '._ABP-647.mp4', '.DS_Store', 'Thumbs.db', 'desktop.ini'):
+        assert is_metadata_name(name) is True, name
+    for name in ('0.png', 'ABP-647.mp4', 'poster.jpg', ''):
+        # 空字符串按"无内容"处理，视为元数据，避免误判路径
+        assert is_metadata_name(name) is (name == ''), name

@@ -18,7 +18,7 @@ __all__ = ['scan_movies', 'get_fmt_size', 'get_remaining_path_len', 'replace_ill
 
 
 from javsp.avid import *
-from javsp.lib import re_escape
+from javsp.lib import is_metadata_name, re_escape
 from javsp.config import Cfg
 from javsp.datatype import Movie
 from javsp.events import EventKind
@@ -98,6 +98,12 @@ def scan_movies(root: str, sink=None, include_scraped: bool = False) -> List[Mov
                  video_count=video_count, unrecognized=unrecognized)
 
         for file in filenames:
+            # 文件名过滤先行：._xxx.mp4 是 macOS 在非 APFS 卷上生成的
+            # AppleDouble 陪伴文件（4096 字节），它保留了原扩展名，
+            # 不排除就会被当成影片去解析番号，进而虚增 video_count、
+            # 甚至制造出"无法识别番号"的假失败项。
+            if is_metadata_name(file):
+                continue
             file_count += 1
             # 扫描大目录时逐文件上报会产生海量事件，因此只在进入新目录
             # 和每 N 个文件时上报一次

@@ -35,7 +35,7 @@ from urllib.parse import parse_qs, urlparse
 
 from javsp.config import Cfg
 from javsp.events import Event, read_events
-from javsp.lib import resource_path
+from javsp.lib import is_metadata_name, resource_path
 
 logger = logging.getLogger(__name__)
 
@@ -272,6 +272,12 @@ class _Handler(BaseHTTPRequestHandler):
         if not candidate.is_file():
             self._send_json({'error': 'not_found'}, HTTPStatus.NOT_FOUND)
             return
+        # 系统元数据文件（AppleDouble / .DS_Store 等）不能当图片返回：
+        # 它们会以 image/png 发给 WebKit，解码失败后前端只能显示空白。
+        # 返回 404 让浏览器走 onerror，语义也比"200 + 垃圾内容"正确。
+        if is_metadata_name(candidate.name):
+            self._send_json({'error': 'metadata_file'}, HTTPStatus.NOT_FOUND)
+            return
         self._send_file(candidate)
 
     def _serve_remote_image(self, url: str) -> None:
@@ -489,7 +495,10 @@ def _collect_gallery(folder: Path, stem: str) -> Dict[str, Any]:
         try:
             entries = sorted(
                 (p for p in still_dir.iterdir()
-                 if p.is_file() and p.suffix.lower() in IMAGE_EXTENSIONS),
+                 if p.is_file() and p.suffix.lower() in IMAGE_EXTENSIONS
+                 # 排除 AppleDouble（._0.png）等系统元数据文件：
+                 # 它们后缀合法但解码失败，混进来会让界面出现空白缩略图
+                 and not is_metadata_name(p.name)),
                 # 0.png 1.png ... 10.png 需要按数值而非字典序排列
                 key=lambda p: (_numeric_prefix(p.stem), p.name.lower()))
             result['stills'] = [str(p) for p in entries]
@@ -499,6 +508,9 @@ def _collect_gallery(folder: Path, stem: str) -> Dict[str, Any]:
     try:
         for path in sorted(folder.iterdir()):
             if not path.is_file() or path.suffix.lower() not in IMAGE_EXTENSIONS:
+                continue
+            # 同 extrafanart：跳过 ._poster.jpg 这类系统元数据伴随文件
+            if is_metadata_name(path.name):
                 continue
             kind = _image_kind(path, stem)
             # 只接受与本影片相关或由本程序生成的图片名
